@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from openai import OpenAI
+
+from ..utils.openai_tracing import wrap_openai_client
 from zep_cloud.client import Zep
 
 from ..config import Config
@@ -209,7 +211,9 @@ class OasisProfileGenerator:
 
         self.client: Optional[OpenAI] = None
         if not self._vertex:
-            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            self.client = wrap_openai_client(
+                OpenAI(api_key=self.api_key, base_url=self.base_url)
+            )
         
         # Zep客户端用于检索丰富上下文
         self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
@@ -224,9 +228,11 @@ class OasisProfileGenerator:
 
     def _active_llm_openai(self) -> OpenAI:
         if self._vertex:
-            return OpenAI(
-                api_key=effective_llm_api_key_or_vertex_token(self.api_key),
-                base_url=self.base_url,
+            return wrap_openai_client(
+                OpenAI(
+                    api_key=effective_llm_api_key_or_vertex_token(self.api_key),
+                    base_url=self.base_url,
+                )
             )
         assert self.client is not None
         return self.client

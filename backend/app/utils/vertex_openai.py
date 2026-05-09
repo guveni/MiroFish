@@ -7,6 +7,7 @@ See: https://cloud.google.com/vertex-ai/generative-ai/docs/migrate/openai/overvi
 
 import os
 from typing import Optional, Tuple
+from urllib.parse import urlparse
 
 
 _VERTEX_SCOPES = ("https://www.googleapis.com/auth/cloud-platform",)
@@ -35,14 +36,30 @@ def _vertex_location() -> str:
     return (os.environ.get("VERTEX_AI_LOCATION") or "us-central1").strip()
 
 
+def _looks_like_vertex_openapi_endpoint(url: str) -> bool:
+    """True if LLM_BASE_URL points at Vertex Chat Completions (OpenAPI) roots."""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or ""
+    except ValueError:
+        return False
+    return "aiplatform.googleapis.com" in host and "/endpoints/openapi" in path
+
+
 def vertex_openapi_base_url() -> Optional[str]:
     """
     Effective OpenAI base URL for Vertex (…/endpoints/openapi), without trailing slash.
-    Uses LLM_BASE_URL if set; otherwise builds from project + region.
+
+    Uses LLM_BASE_URL only when it looks like a regional Vertex openapi endpoint,
+    otherwise ignores leftover values (e.g. DashScope URLs from copying .env.example)
+    unless LLM_VERTEX_USE_EXPLICIT_BASE_URL=true.
     """
     explicit = (os.environ.get("LLM_BASE_URL") or "").strip()
     if explicit:
-        return explicit.rstrip("/")
+        force = _truthy(os.environ.get("LLM_VERTEX_USE_EXPLICIT_BASE_URL"))
+        if force or _looks_like_vertex_openapi_endpoint(explicit):
+            return explicit.rstrip("/")
     project = _vertex_project_id()
     location = _vertex_location()
     if not project:
@@ -50,6 +67,12 @@ def vertex_openapi_base_url() -> Optional[str]:
     api_version = (os.environ.get("VERTEX_AI_OPENAI_API_VERSION") or "v1").strip().lstrip("/")
     if api_version not in ("v1", "v1beta1"):
         api_version = "v1"
+    loc = location.lower()
+    if loc == "global":
+        return (
+            f"https://aiplatform.googleapis.com/{api_version}/projects/"
+            f"{project}/locations/global/endpoints/openapi"
+        )
     return (
         f"https://{location}-aiplatform.googleapis.com/{api_version}/projects/"
         f"{project}/locations/{location}/endpoints/openapi"

@@ -9,6 +9,7 @@ from typing import Optional, Dict, Any, List
 from openai import OpenAI
 
 from ..config import Config
+from .openai_tracing import wrap_openai_client
 from .vertex_openai import (
     effective_llm_api_key_or_vertex_token,
     effective_llm_base_url,
@@ -45,15 +46,17 @@ class LLMClient:
 
         self.client: Optional[OpenAI] = None
         if not self._vertex:
-            self.client = OpenAI(
-                api_key=self.api_key or Config.LLM_API_KEY,
-                base_url=self.base_url,
+            self.client = wrap_openai_client(
+                OpenAI(
+                    api_key=self.api_key or Config.LLM_API_KEY,
+                    base_url=self.base_url,
+                )
             )
 
     def _active_client(self) -> OpenAI:
         if self._vertex:
             key = effective_llm_api_key_or_vertex_token(self.api_key)
-            return OpenAI(api_key=key, base_url=self.base_url)
+            return wrap_openai_client(OpenAI(api_key=key, base_url=self.base_url))
         assert self.client is not None
         return self.client
     

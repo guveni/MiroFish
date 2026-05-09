@@ -18,6 +18,8 @@ from datetime import datetime
 
 from openai import OpenAI
 
+from ..utils.openai_tracing import wrap_openai_client
+
 from ..config import Config
 from ..utils.vertex_openai import (
     effective_llm_api_key_or_vertex_token,
@@ -251,13 +253,17 @@ class SimulationConfigGenerator:
 
         self.client: Optional[OpenAI] = None
         if not self._vertex:
-            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            self.client = wrap_openai_client(
+                OpenAI(api_key=self.api_key, base_url=self.base_url)
+            )
 
     def _active_llm_openai(self) -> OpenAI:
         if self._vertex:
-            return OpenAI(
-                api_key=effective_llm_api_key_or_vertex_token(self.api_key),
-                base_url=self.base_url,
+            return wrap_openai_client(
+                OpenAI(
+                    api_key=effective_llm_api_key_or_vertex_token(self.api_key),
+                    base_url=self.base_url,
+                )
             )
         assert self.client is not None
         return self.client
