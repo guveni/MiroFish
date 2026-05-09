@@ -31,6 +31,11 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    LLM_USE_VERTEX_AI = (
+        os.environ.get('LLM_USE_VERTEX_AI', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    )
+    VERTEX_AI_PROJECT_ID = os.environ.get('VERTEX_AI_PROJECT_ID', '')
+    VERTEX_AI_LOCATION = os.environ.get('VERTEX_AI_LOCATION', 'us-central1')
     
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
@@ -67,7 +72,15 @@ class Config:
     def validate(cls):
         """验证必要配置"""
         errors = []
-        if not cls.LLM_API_KEY:
+        if cls.LLM_USE_VERTEX_AI:
+            from .utils.vertex_openai import vertex_config_present
+
+            if not vertex_config_present():
+                errors.append(
+                    "Vertex AI 启用时请在 .env 中设置 VERTEX_AI_PROJECT_ID（或 GOOGLE_CLOUD_PROJECT）"
+                    " 与 VERTEX_AI_LOCATION，或直接设置完整的 LLM_BASE_URL（openapi 端点）"
+                )
+        elif not cls.LLM_API_KEY:
             errors.append("LLM_API_KEY 未配置")
         if not cls.ZEP_API_KEY:
             errors.append("ZEP_API_KEY 未配置")

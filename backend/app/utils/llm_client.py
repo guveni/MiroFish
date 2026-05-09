@@ -9,6 +9,12 @@ from typing import Optional, Dict, Any, List
 from openai import OpenAI
 
 from ..config import Config
+from .vertex_openai import (
+    effective_llm_api_key_or_vertex_token,
+    effective_llm_base_url,
+    is_vertex_ai_enabled,
+    vertex_config_present,
+)
 
 
 class LLMClient:
@@ -20,17 +26,36 @@ class LLMClient:
         base_url: Optional[str] = None,
         model: Optional[str] = None
     ):
-        self.api_key = api_key or Config.LLM_API_KEY
-        self.base_url = base_url or Config.LLM_BASE_URL
+        self._vertex = is_vertex_ai_enabled()
+        resolved_base = base_url or (
+            effective_llm_base_url() if self._vertex else None
+        ) or Config.LLM_BASE_URL
+        self.base_url = resolved_base
         self.model = model or Config.LLM_MODEL_NAME
-        
-        if not self.api_key:
+        self.api_key = api_key
+
+        if not self._vertex and not (self.api_key or Config.LLM_API_KEY):
             raise ValueError("LLM_API_KEY 未配置")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
+
+        if self._vertex and not vertex_config_present():
+            raise ValueError(
+                "Vertex AI：无法解析 openapi 基础 URL（检查 VERTEX_AI_PROJECT_ID / "
+                "VERTEX_AI_LOCATION 或 LLM_BASE_URL）"
+            )
+
+        self.client: Optional[OpenAI] = None
+        if not self._vertex:
+            self.client = OpenAI(
+                api_key=self.api_key or Config.LLM_API_KEY,
+                base_url=self.base_url,
+            )
+
+    def _active_client(self) -> OpenAI:
+        if self._vertex:
+            key = effective_llm_api_key_or_vertex_token(self.api_key)
+            return OpenAI(api_key=key, base_url=self.base_url)
+        assert self.client is not None
+        return self.client
     
     def chat(
         self,
@@ -61,7 +86,7 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
-        response = self.client.chat.completions.create(**kwargs)
+        response = self._active_client().chat.completions.create(**kwargs)
         content = response.choices[0].message.content
         # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()

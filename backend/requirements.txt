@@ -12,6 +12,8 @@ flask-cors>=6.0.0
 # ============= LLM 相关 =============
 # OpenAI SDK（统一使用 OpenAI 格式调用 LLM）
 openai>=1.0.0
+# Vertex AI Gemini OpenAI-compat endpoint (Application Default Credentials)
+google-auth>=2.29.0
 
 # ============= Zep Cloud =============
 zep-cloud==3.13.0

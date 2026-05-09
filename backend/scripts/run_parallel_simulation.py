@@ -156,6 +156,7 @@ def init_logging_for_simulation(simulation_dir: str):
 
 
 from action_logger import SimulationLogManager, PlatformActionLogger
+from app.utils.vertex_openai import is_vertex_ai_enabled, prepare_camel_openai_env
 
 try:
     from camel.models import ModelFactory
@@ -1008,28 +1009,47 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
         llm_base_url = boost_base_url
         llm_model = boost_model or os.environ.get("LLM_MODEL_NAME", "")
         config_label = "[加速LLM]"
+        # 如果 .env 中没有模型名，则使用 config 作为备用
+        if not llm_model:
+            llm_model = config.get("llm_model", "gpt-4o-mini")
+        os.environ["OPENAI_API_KEY"] = llm_api_key
+        if llm_base_url:
+            os.environ["OPENAI_API_BASE_URL"] = llm_base_url
+        else:
+            os.environ.pop("OPENAI_API_BASE_URL", None)
+        print(
+            f"{config_label} model={llm_model}, "
+            f"base_url={llm_base_url[:40] if llm_base_url else '默认'}..."
+        )
+    elif is_vertex_ai_enabled():
+        config_label = "[通用LLM/Vertex]"
+        llm_model, url_display, auth_hint = prepare_camel_openai_env(
+            config.get("llm_model", "gpt-4o-mini")
+        )
+        print(
+            f"{config_label} model={llm_model}, base_url={url_display}, auth={auth_hint}"
+        )
     else:
         # 使用通用配置
         llm_api_key = os.environ.get("LLM_API_KEY", "")
         llm_base_url = os.environ.get("LLM_BASE_URL", "")
         llm_model = os.environ.get("LLM_MODEL_NAME", "")
         config_label = "[通用LLM]"
-    
-    # 如果 .env 中没有模型名，则使用 config 作为备用
-    if not llm_model:
-        llm_model = config.get("llm_model", "gpt-4o-mini")
-    
-    # 设置 camel-ai 所需的环境变量
-    if llm_api_key:
-        os.environ["OPENAI_API_KEY"] = llm_api_key
-    
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise ValueError("缺少 API Key 配置，请在项目根目录 .env 文件中设置 LLM_API_KEY")
-    
-    if llm_base_url:
-        os.environ["OPENAI_API_BASE_URL"] = llm_base_url
-    
-    print(f"{config_label} model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else '默认'}...")
+        # 如果 .env 中没有模型名，则使用 config 作为备用
+        if not llm_model:
+            llm_model = config.get("llm_model", "gpt-4o-mini")
+        if llm_api_key:
+            os.environ["OPENAI_API_KEY"] = llm_api_key
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise ValueError("缺少 API Key 配置，请在项目根目录 .env 文件中设置 LLM_API_KEY")
+        if llm_base_url:
+            os.environ["OPENAI_API_BASE_URL"] = llm_base_url
+        else:
+            os.environ.pop("OPENAI_API_BASE_URL", None)
+        print(
+            f"{config_label} model={llm_model}, "
+            f"base_url={llm_base_url[:40] if llm_base_url else '默认'}..."
+        )
     
     return ModelFactory.create(
         model_platform=ModelPlatformType.OPENAI,

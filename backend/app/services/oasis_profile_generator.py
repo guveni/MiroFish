@@ -19,6 +19,12 @@ from openai import OpenAI
 from zep_cloud.client import Zep
 
 from ..config import Config
+from ..utils.vertex_openai import (
+    effective_llm_api_key_or_vertex_token,
+    effective_llm_base_url,
+    is_vertex_ai_enabled,
+    vertex_config_present,
+)
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, get_locale, set_locale, t
 from .zep_entity_reader import EntityNode, ZepEntityReader
@@ -187,16 +193,23 @@ class OasisProfileGenerator:
         graph_id: Optional[str] = None
     ):
         self.api_key = api_key or Config.LLM_API_KEY
-        self.base_url = base_url or Config.LLM_BASE_URL
+        self._vertex = is_vertex_ai_enabled()
+        self.base_url = base_url or (
+            effective_llm_base_url() if self._vertex else None
+        ) or Config.LLM_BASE_URL
         self.model_name = model_name or Config.LLM_MODEL_NAME
-        
-        if not self.api_key:
+
+        if self._vertex and not vertex_config_present():
+            raise ValueError(
+                "Vertex AI：无法解析 openapi 基础 URL（VERTEX_AI_PROJECT_ID / "
+                "VERTEX_AI_LOCATION 或 LLM_BASE_URL）"
+            )
+        if not self._vertex and not self.api_key:
             raise ValueError("LLM_API_KEY 未配置")
-        
-        self.client = OpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url
-        )
+
+        self.client: Optional[OpenAI] = None
+        if not self._vertex:
+            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
         
         # Zep客户端用于检索丰富上下文
         self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
@@ -208,6 +221,15 @@ class OasisProfileGenerator:
                 self.zep_client = Zep(api_key=self.zep_api_key)
             except Exception as e:
                 logger.warning(f"Zep客户端初始化失败: {e}")
+
+    def _active_llm_openai(self) -> OpenAI:
+        if self._vertex:
+            return OpenAI(
+                api_key=effective_llm_api_key_or_vertex_token(self.api_key),
+                base_url=self.base_url,
+            )
+        assert self.client is not None
+        return self.client
     
     def generate_profile_from_entity(
         self, 
@@ -527,7 +549,7 @@ class OasisProfileGenerator:
         
         for attempt in range(max_attempts):
             try:
-                response = self.client.chat.completions.create(
+                response = self._active_llm_openai().chat.completions.create(
                     model=self.model_name,
                     messages=[
                         {"role": "system", "content": self._get_system_prompt(is_individual)},
