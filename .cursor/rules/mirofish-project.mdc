@@ -1,0 +1,43 @@
+---
+description: MiroFish project layout, setup commands, coding standards, and verification expectations.
+alwaysApply: true
+---
+
+# MiroFish project rules
+
+MiroFish is a multi-agent prediction and simulation app with a Flask backend and Vue 3 frontend.
+
+## Layout
+
+- Root `package.json`: shared install, dev, build, and verification scripts.
+- `backend/`: Python 3.11-3.12 Flask backend managed with `uv`.
+- `frontend/`: Vue 3 + Vite app.
+- `locales/`: localization JSON; write new source copy in English first.
+- `samples/`: smoke-test and example material.
+
+## Commands
+
+- `npm run setup:all`: install all root, frontend, and backend dependencies.
+- `npm run setup`: install root and frontend Node dependencies.
+- `npm run setup:backend`: sync backend dependencies with `uv`.
+- `npm run dev`: run backend and frontend together.
+- `npm run backend`: run only the backend.
+- `npm run frontend`: run only the frontend.
+- `npm run build`: build the frontend.
+- `npm run verify:gemini`: verify Gemini Vertex configuration.
+
+Create `.env` from `.env.example` and fill in required API keys before running services. Never commit secrets.
+
+## Coding standards
+
+- Write new and modified code, comments, Markdown, prompts, logs, and UI copy in English.
+- Preserve non-English text only when required for user data, locale files, proper names, or quotations.
+- Match the existing Flask, Vue, Vite, and `uv` patterns.
+- Prefer existing services and utilities before adding new abstractions.
+- Do not add dependencies without a clear need and approval.
+
+## Verification
+
+- For frontend changes, run `npm run build` when practical.
+- For backend changes, run focused tests with `cd backend && uv run pytest` when relevant tests exist.
+- For integration changes, run the smallest command that proves the wiring and report missing external services or credentials.

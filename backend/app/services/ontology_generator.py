@@ -6,7 +6,8 @@
 import json
 import logging
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
+from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.locale import get_language_instruction
 from ..utils.pipeline_retry import run_pipeline_step
@@ -189,6 +190,7 @@ class OntologyGenerator:
         simulation_requirement: str,
         additional_context: Optional[str] = None,
         web_search_text: Optional[str] = None,
+        progress_callback: Optional[Callable[[str, int], None]] = None,
     ) -> Dict[str, Any]:
         """
         生成本体定义
@@ -216,17 +218,29 @@ class OntologyGenerator:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message}
         ]
-        
+
+        if progress_callback:
+            progress_callback("Building LLM prompt...", 55)
+
+        if progress_callback:
+            progress_callback(
+                "Calling LLM to generate ontology (may take several minutes)...",
+                65,
+            )
+
         # 调用LLM（步骤级指数退避重试）
         result = run_pipeline_step(
             "ontology_llm_json",
             lambda: self.llm_client.chat_json(
                 messages=messages,
                 temperature=0.3,
-                max_tokens=4096,
+                max_tokens=Config.LLM_JSON_MAX_TOKENS,
             ),
         )
-        
+
+        if progress_callback:
+            progress_callback("LLM response received; validating JSON...", 85)
+
         # 验证和后处理
         result = self._validate_and_process(result)
         

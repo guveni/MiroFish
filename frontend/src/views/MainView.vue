@@ -113,6 +113,9 @@ const systemLogs = ref([])
 // Polling timers
 let pollTimer = null
 let graphPollTimer = null
+let ontologyPollTimer = null
+let lastOntologyLogMessage = ''
+let lastBuildLogMessage = ''
 
 // --- Computed Layout Styles ---
 const leftPanelStyle = computed(() => {
@@ -143,10 +146,9 @@ const statusText = computed(() => {
 })
 
 // --- Helpers ---
-const addLog = (msg) => {
+const addLog = (msg, level = 'info') => {
   const time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) + '.' + new Date().getMilliseconds().toString().padStart(3, '0')
-  systemLogs.value.push({ time, msg })
-  // Keep last 100 logs
+  systemLogs.value.push({ time, msg, level })
   if (systemLogs.value.length > 100) {
     systemLogs.value.shift()
   }
@@ -202,8 +204,9 @@ const handleNewProject = async () => {
   try {
     loading.value = true
     currentPhase.value = 0
-    ontologyProgress.value = { message: 'Preparing seed context...' }
-    addLog('Starting ontology generation: preparing seed context...')
+    ontologyProgress.value = { message: 'Uploading files and starting ontology task...', progress: 0 }
+    addLog('Starting ontology generation: uploading files...')
+    lastOntologyLogMessage = ''
     
     const formData = new FormData()
     pending.files.forEach(f => formData.append('files', f))
@@ -211,22 +214,31 @@ const handleNewProject = async () => {
     formData.append('use_vertex_search', pending.useVertexSearch ? 'true' : 'false')
     
     const res = await generateOntology(formData)
-    if (res.success) {
+    if (res.success && res.data?.task_id) {
+      clearPendingUpload()
+      currentProjectId.value = res.data.project_id
+      addLog(`Ontology task started: ${res.data.task_id}`, 'info')
+      addLog(`Project created: ${res.data.project_id}`, 'info')
+      router.replace({ name: 'Process', params: { projectId: res.data.project_id } })
+      startOntologyPolling(res.data.task_id)
+    } else if (res.success && res.data?.ontology) {
+      // Legacy synchronous response (if server returns full payload)
       clearPendingUpload()
       currentProjectId.value = res.data.project_id
       projectData.value = res.data
-      
       router.replace({ name: 'Process', params: { projectId: res.data.project_id } })
       ontologyProgress.value = null
-      addLog(`Ontology generated successfully for project ${res.data.project_id}`)
+      addLog(`Ontology generated for project ${res.data.project_id}`)
       await startBuildGraph()
     } else {
       error.value = res.error || 'Ontology generation failed'
-      addLog(`Error generating ontology: ${error.value}`)
+      ontologyProgress.value = null
+      addLog(`Error starting ontology: ${error.value}`, 'error')
     }
   } catch (err) {
     error.value = err.message
-    addLog(`Exception in handleNewProject: ${err.message}`)
+    ontologyProgress.value = null
+    addLog(`Exception in handleNewProject: ${err.message}`, 'error')
   } finally {
     loading.value = false
   }
@@ -241,8 +253,13 @@ const loadProject = async () => {
       projectData.value = res.data
       updatePhaseByStatus(res.data.status)
       addLog(`Project loaded. Status: ${res.data.status}`)
-      
-      if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
+
+      if (res.data.ontology_task_id) {
+        currentPhase.value = 0
+        ontologyProgress.value = { message: 'Resuming ontology generation...', progress: 0 }
+        addLog(`Resuming ontology task: ${res.data.ontology_task_id}`)
+        startOntologyPolling(res.data.ontology_task_id)
+      } else if (res.data.status === 'ontology_generated' && !res.data.graph_id) {
         await startBuildGraph()
       } else if (res.data.status === 'graph_building' && res.data.graph_build_task_id) {
         currentPhase.value = 1
@@ -319,7 +336,53 @@ const fetchGraphData = async () => {
   }
 }
 
+const startOntologyPolling = (taskId) => {
+  pollOntologyTask(taskId)
+  ontologyPollTimer = setInterval(() => pollOntologyTask(taskId), 1500)
+}
+
+const pollOntologyTask = async (taskId) => {
+  try {
+    const res = await getTaskStatus(taskId)
+    if (!res.success) return
+
+    const task = res.data
+    ontologyProgress.value = {
+      message: task.message || 'Processing...',
+      progress: task.progress ?? 0,
+    }
+
+    if (task.message && task.message !== lastOntologyLogMessage) {
+      lastOntologyLogMessage = task.message
+      addLog(task.message)
+    }
+
+    if (task.status === 'completed' && task.result) {
+      stopOntologyPolling()
+      projectData.value = task.result
+      ontologyProgress.value = null
+      addLog(
+        `Ontology complete: ${task.result.ontology?.entity_types?.length ?? 0} entity types`,
+        'info',
+      )
+      await startBuildGraph()
+    } else if (task.status === 'failed') {
+      stopOntologyPolling()
+      ontologyProgress.value = null
+      const errText = task.error || task.message || 'Ontology generation failed'
+      error.value = typeof errText === 'string' ? errText.split('\n')[0] : 'Ontology generation failed'
+      addLog(`Ontology failed: ${error.value}`, 'error')
+      if (task.error && task.error !== error.value) {
+        addLog(task.error, 'error')
+      }
+    }
+  } catch (e) {
+    addLog(`Ontology poll error: ${e.message}`, 'error')
+  }
+}
+
 const startPollingTask = (taskId) => {
+  lastBuildLogMessage = ''
   pollTaskStatus(taskId)
   pollTimer = setInterval(() => pollTaskStatus(taskId), 2000)
 }
@@ -330,8 +393,8 @@ const pollTaskStatus = async (taskId) => {
     if (res.success) {
       const task = res.data
       
-      // Log progress message if it changed
-      if (task.message && task.message !== buildProgress.value?.message) {
+      if (task.message && task.message !== lastBuildLogMessage) {
+        lastBuildLogMessage = task.message
         addLog(task.message)
       }
       
@@ -351,8 +414,8 @@ const pollTaskStatus = async (taskId) => {
         }
       } else if (task.status === 'failed') {
         stopPolling()
-        error.value = task.error
-        addLog(`Graph build task failed: ${task.error}`)
+        error.value = task.error || task.message
+        addLog(`Graph build task failed: ${error.value}`, 'error')
       }
     }
   } catch (e) {
@@ -385,6 +448,13 @@ const refreshGraph = () => {
   }
 }
 
+const stopOntologyPolling = () => {
+  if (ontologyPollTimer) {
+    clearInterval(ontologyPollTimer)
+    ontologyPollTimer = null
+  }
+}
+
 const stopPolling = () => {
   if (pollTimer) {
     clearInterval(pollTimer)
@@ -405,6 +475,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopOntologyPolling()
   stopPolling()
   stopGraphPolling()
 })

@@ -110,7 +110,17 @@ class LLMClient:
             retry_unknown_errors=False,
         )
         attach_completion_usage_metadata(response, model=self.model)
-        content = response.choices[0].message.content or ""
+        if not response.choices:
+            raise ValueError("LLM returned no choices")
+        choice = response.choices[0]
+        message = choice.message
+        if message is None:
+            finish = getattr(choice, "finish_reason", None) or "unknown"
+            raise ValueError(
+                f"LLM returned no message content (finish_reason={finish!r}). "
+                "Increase max_tokens or reduce the requested output size."
+            )
+        content = message.content or ""
         # Some models include hidden reasoning tags in content; remove them.
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         return content

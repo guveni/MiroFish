@@ -24,7 +24,12 @@
           <!-- Loading / Progress -->
           <div v-if="currentPhase === 0 && ontologyProgress" class="progress-section">
             <div class="spinner-sm"></div>
-            <span>{{ ontologyProgress.message || $t('step1.analyzingDocs') }}</span>
+            <span>
+              {{ ontologyProgress.message || $t('step1.analyzingDocs') }}
+              <template v-if="ontologyProgress.progress != null">
+                ({{ ontologyProgress.progress }}%)
+              </template>
+            </span>
           </div>
 
           <!-- Detail Overlay -->
@@ -215,9 +220,14 @@
         <span class="log-id">{{ projectData?.project_id || 'NO_PROJECT' }}</span>
       </div>
       <div class="log-content" ref="logContent">
-        <div class="log-line" v-for="(log, idx) in systemLogs" :key="idx">
+        <div
+          class="log-line"
+          v-for="(log, idx) in systemLogs"
+          :key="idx"
+          :class="{ 'log-error': log.level === 'error' }"
+        >
           <span class="log-time">{{ log.time }}</span>
-          <span class="log-msg">{{ log.msg }}</span>
+          <span class="log-msg" :class="{ 'log-msg-error': log.level === 'error' }">{{ log.msg }}</span>
         </div>
       </div>
     </div>
@@ -802,7 +812,7 @@ watch(() => props.systemLogs.length, () => {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  height: 80px; /* Approx 4 lines visible */
+  height: 120px;
   overflow-y: auto;
   padding-right: 4px;
 }
@@ -831,5 +841,13 @@ watch(() => props.systemLogs.length, () => {
 .log-msg {
   color: #CCC;
   word-break: break-all;
+}
+
+.log-msg-error {
+  color: #FF8A65;
+}
+
+.log-line.log-error .log-time {
+  color: #B34747;
 }
 </style>

@@ -126,6 +126,7 @@ def reset_project(project_id: str):
     
     project.graph_id = None
     project.graph_build_task_id = None
+    project.ontology_task_id = None
     project.error = None
     ProjectManager.save_project(project)
     
@@ -138,46 +139,39 @@ def reset_project(project_id: str):
 
 # ============== API 1: Upload Files And Generate Ontology ==============
 
+def _ontology_result_payload(project, *, search_metadata=None, use_vertex_search=False):
+    """Build API payload after ontology generation completes."""
+    payload = {
+        "project_id": project.project_id,
+        "project_name": project.name,
+        "ontology": project.ontology,
+        "analysis_summary": project.analysis_summary,
+        "files": project.files,
+        "total_text_length": project.total_text_length,
+        "gemini_grounding_metadata": project.gemini_grounding_metadata,
+    }
+    if use_vertex_search and search_metadata is not None:
+        payload["search_metadata"] = search_metadata
+    return payload
+
+
 @graph_bp.route('/ontology/generate', methods=['POST'])
 def generate_ontology():
     """
     Upload files and optionally use Gemini web search grounding, then generate ontology.
-    
-    Request: multipart/form-data
-    
-    Parameters:
-        files: Uploaded files (PDF/MD/TXT); optional when use_vertex_search is enabled.
-        simulation_requirement: Required simulation requirement.
-        use_vertex_search: Optional Gemini web search grounding toggle.
-        project_name: Optional project name.
-        additional_context: Optional extra context.
-        
-    Returns:
-        {
-            "success": true,
-            "data": {
-                "project_id": "proj_xxxx",
-                "ontology": {...},
-                "files": [...],
-                "total_text_length": 12345,
-                "search_metadata": {...}
-                "gemini_grounding_metadata": {...}
-            }
-        }
+
+    Returns immediately with task_id; poll GET /api/graph/task/<task_id> for progress.
+    On completion, task.result contains the same payload as the former synchronous response.
     """
     project = None
     try:
-        logger.info("=== Starting ontology generation ===")
-        
-        # Parse parameters.
+        logger.info("=== Starting ontology generation (async) ===")
+
         simulation_requirement = request.form.get('simulation_requirement', '')
         project_name = request.form.get('project_name', 'Unnamed Project')
         additional_context = request.form.get('additional_context', '')
         use_vertex_search = _form_bool(request.form.get('use_vertex_search'))
 
-        logger.debug("Project name: %s", project_name)
-        logger.debug("Simulation requirement: %s...", simulation_requirement[:100])
-        
         if not simulation_requirement:
             return jsonify({
                 "success": False,
@@ -209,160 +203,279 @@ def generate_ontology():
                 "error": t('api.requireDocOrVertexSearch')
             }), 400
 
-        search_corpus = None
-        search_metadata = None
-        if use_vertex_search:
-            try:
-                rqg = ResearchQueryGenerator()
-                queries = rqg.generate_queries(
-                    simulation_requirement,
-                    additional_context if additional_context else None,
-                )
-                search_corpus, search_metadata = search_queries_to_corpus(
-                    queries,
-                    simulation_requirement=simulation_requirement,
-                )
-            except ValueError as e:
-                if str(e) == EMPTY_GEMINI_WEB_SEARCH_RESULTS:
-                    return jsonify({
-                        "success": False,
-                        "error": t('api.geminiWebSearchEmptyResults')
-                    }), 400
-                if str(e) == GEMINI_WEB_SEARCH_VERTEX_NOT_CONFIGURED:
-                    return jsonify({
-                        "success": False,
-                        "error": t('api.geminiWebSearchConfigMissing')
-                    }), 400
-                if str(e) == GEMINI_WEB_SEARCH_MODEL_NOT_SET:
-                    return jsonify({
-                        "success": False,
-                        "error": t('api.geminiWebSearchModelMissing')
-                    }), 400
-                raise
+        task_manager = TaskManager()
+        task_id = task_manager.create_task(
+            "ontology_generate",
+            metadata={"project_name": project_name},
+        )
+        task_manager.update_task(
+            task_id,
+            status=TaskStatus.PROCESSING,
+            progress=2,
+            message=t('progress.ontologyValidating'),
+        )
 
-        # Create project.
         project = ProjectManager.create_project(name=project_name)
         project.simulation_requirement = simulation_requirement
-        logger.info("Created project: %s", project.project_id)
-        
-        # Save files and extract text.
-        document_texts = []
-        all_text = ""
-        
+        project.ontology_task_id = task_id
+        ProjectManager.save_project(project)
+        logger.info("Created project: %s (task_id=%s)", project.project_id, task_id)
+
+        saved_file_count = 0
         for file in uploaded_files:
             if file and file.filename and allowed_file(file.filename):
-                # Save file to the project directory.
                 file_info = ProjectManager.save_file_to_project(
-                    project.project_id, 
-                    file, 
-                    file.filename
+                    project.project_id,
+                    file,
+                    file.filename,
                 )
                 project.files.append({
                     "filename": file_info["original_filename"],
-                    "size": file_info["size"]
+                    "size": file_info["size"],
                 })
-                
-                # Extract text.
-                text = FileParser.extract_text(file_info["path"])
-                text = TextProcessor.preprocess_text(text)
-                document_texts.append(text)
-                all_text += f"\n\n=== {file_info['original_filename']} ===\n{text}"
+                saved_file_count += 1
 
-        if use_vertex_search and search_corpus:
-            all_text += f"\n\n=== gemini_web_search ===\n{search_corpus}"
-
-        if not document_texts and not (use_vertex_search and search_corpus):
-            ProjectManager.delete_project(project.project_id)
-            return jsonify({
-                "success": False,
-                "error": t('api.noDocProcessed')
-            }), 400
-        
-        if not all_text.strip():
-            ProjectManager.delete_project(project.project_id)
-            return jsonify({
-                "success": False,
-                "error": t('api.geminiWebSearchEmptyResults')
-            }), 400
-
-        # Save extracted text.
-        project.total_text_length = len(all_text)
-        ProjectManager.save_extracted_text(project.project_id, all_text)
-        logger.info("Text extraction complete: %d characters", len(all_text))
-        
-        # Generate ontology.
-        logger.info("Calling LLM to generate ontology...")
-        generator = OntologyGenerator()
-        ontology = generator.generate(
-            document_texts=document_texts,
-            simulation_requirement=simulation_requirement,
-            additional_context=additional_context if additional_context else None,
-            web_search_text=search_corpus,
-        )
-        
-        # Save ontology to the project.
-        entity_count = len(ontology.get("entity_types", []))
-        edge_count = len(ontology.get("edge_types", []))
-        logger.info(
-            "Ontology generated: %d entity types, %d relationship types",
-            entity_count,
-            edge_count,
-        )
-        
-        project.ontology = {
-            "entity_types": ontology.get("entity_types", []),
-            "edge_types": ontology.get("edge_types", [])
-        }
-        project.analysis_summary = ontology.get("analysis_summary", "")
-        project.status = ProjectStatus.ONTOLOGY_GENERATED
-        if use_vertex_search and search_metadata is not None:
-            project.gemini_grounding_metadata = search_metadata
-        else:
-            project.gemini_grounding_metadata = None
-
-        ProjectManager.save_project(project)
-        logger.info("=== Ontology generation complete === project_id=%s", project.project_id)
-
-        try:
-            checkpoint_project_stage(
-                project.project_id,
-                "ontology_generated",
-                {
-                    "project_id": project.project_id,
-                    "ontology_entity_types": entity_count,
-                    "ontology_edge_types": edge_count,
-                    "ontology": project.ontology,
-                    "analysis_summary": project.analysis_summary,
-                    "files": project.files,
-                    "total_text_length": project.total_text_length,
-                    "use_vertex_search": use_vertex_search,
-                    "gemini_grounding_metadata": (
-                        search_metadata if use_vertex_search else None
-                    ),
-                },
+        if saved_file_count:
+            task_manager.update_task(
+                task_id,
+                progress=8,
+                message=t('progress.ontologySavingFiles', count=saved_file_count),
             )
-        except Exception as cp_err:
-            logger.warning("run checkpoint ontology_generated skipped: %s", cp_err)
+            ProjectManager.save_project(project)
 
-        payload = {
-            "project_id": project.project_id,
-            "project_name": project.name,
-            "ontology": project.ontology,
-            "analysis_summary": project.analysis_summary,
-            "files": project.files,
-            "total_text_length": project.total_text_length,
-            "gemini_grounding_metadata": project.gemini_grounding_metadata,
-        }
-        if use_vertex_search and search_metadata is not None:
-            payload["search_metadata"] = search_metadata
-        
+        current_locale = get_locale()
+
+        def ontology_task():
+            set_locale(current_locale)
+            worker_logger = get_logger('mirofish.ontology')
+            local_project = ProjectManager.get_project(project.project_id)
+            if not local_project:
+                task_manager.fail_task(task_id, f"Project not found: {project.project_id}")
+                return
+
+            try:
+                document_texts = []
+                all_text = ""
+                search_corpus = None
+                search_metadata = None
+
+                task_manager.update_task(
+                    task_id,
+                    progress=12,
+                    message=t('progress.ontologyExtractingText', chars=0),
+                )
+                file_paths = ProjectManager.get_project_files(local_project.project_id)
+                for idx, path in enumerate(file_paths):
+                    label = (
+                        local_project.files[idx]["filename"]
+                        if idx < len(local_project.files)
+                        else os.path.basename(path)
+                    )
+                    text = FileParser.extract_text(path)
+                    text = TextProcessor.preprocess_text(text)
+                    document_texts.append(text)
+                    all_text += f"\n\n=== {label} ===\n{text}"
+
+                if use_vertex_search:
+                    task_manager.update_task(
+                        task_id,
+                        progress=25,
+                        message=t('progress.ontologyWebSearch', count=0),
+                    )
+                    try:
+                        rqg = ResearchQueryGenerator()
+                        queries = rqg.generate_queries(
+                            simulation_requirement,
+                            additional_context if additional_context else None,
+                        )
+                        task_manager.update_task(
+                            task_id,
+                            progress=30,
+                            message=t('progress.ontologyWebSearch', count=len(queries)),
+                        )
+                        search_corpus, search_metadata = search_queries_to_corpus(
+                            queries,
+                            simulation_requirement=simulation_requirement,
+                        )
+                    except ValueError as search_err:
+                        code = str(search_err)
+                        if code == EMPTY_GEMINI_WEB_SEARCH_RESULTS:
+                            raise ValueError(t('api.geminiWebSearchEmptyResults')) from search_err
+                        if code == GEMINI_WEB_SEARCH_VERTEX_NOT_CONFIGURED:
+                            raise ValueError(t('api.geminiWebSearchConfigMissing')) from search_err
+                        if code == GEMINI_WEB_SEARCH_MODEL_NOT_SET:
+                            raise ValueError(t('api.geminiWebSearchModelMissing')) from search_err
+                        raise
+                    if search_corpus:
+                        all_text += f"\n\n=== gemini_web_search ===\n{search_corpus}"
+
+                if not document_texts and not (use_vertex_search and search_corpus):
+                    raise ValueError(t('api.noDocProcessed'))
+
+                if not all_text.strip():
+                    raise ValueError(t('api.geminiWebSearchEmptyResults'))
+
+                char_count = len(all_text)
+                local_project.total_text_length = char_count
+                ProjectManager.save_extracted_text(local_project.project_id, all_text)
+                ProjectManager.save_project(local_project)
+                worker_logger.info(
+                    "[%s] Text extraction complete: %d characters",
+                    task_id,
+                    char_count,
+                )
+                task_manager.update_task(
+                    task_id,
+                    progress=40,
+                    message=t('progress.ontologyExtractingText', chars=char_count),
+                )
+
+                task_manager.update_task(
+                    task_id,
+                    progress=50,
+                    message=t('progress.ontologyCallingLlm'),
+                )
+                worker_logger.info("[%s] Calling LLM to generate ontology...", task_id)
+                generator = OntologyGenerator()
+
+                def llm_progress(msg: str, pct: int) -> None:
+                    task_manager.update_task(
+                        task_id,
+                        progress=max(50, min(88, pct)),
+                        message=msg,
+                    )
+
+                ontology = generator.generate(
+                    document_texts=document_texts,
+                    simulation_requirement=simulation_requirement,
+                    additional_context=additional_context if additional_context else None,
+                    web_search_text=search_corpus,
+                    progress_callback=llm_progress,
+                )
+
+                task_manager.update_task(
+                    task_id,
+                    progress=92,
+                    message=t('progress.ontologyProcessingResult'),
+                )
+
+                entity_count = len(ontology.get("entity_types", []))
+                edge_count = len(ontology.get("edge_types", []))
+                local_project.ontology = {
+                    "entity_types": ontology.get("entity_types", []),
+                    "edge_types": ontology.get("edge_types", []),
+                }
+                local_project.analysis_summary = ontology.get("analysis_summary", "")
+                local_project.status = ProjectStatus.ONTOLOGY_GENERATED
+                local_project.gemini_grounding_metadata = (
+                    search_metadata if use_vertex_search else None
+                )
+                local_project.ontology_task_id = None
+                local_project.error = None
+
+                task_manager.update_task(
+                    task_id,
+                    progress=96,
+                    message=t('progress.ontologySaving'),
+                )
+                ProjectManager.save_project(local_project)
+                worker_logger.info(
+                    "[%s] Ontology generated: %d entity types, %d relationship types",
+                    task_id,
+                    entity_count,
+                    edge_count,
+                )
+
+                try:
+                    checkpoint_project_stage(
+                        local_project.project_id,
+                        "ontology_generated",
+                        {
+                            "project_id": local_project.project_id,
+                            "ontology_entity_types": entity_count,
+                            "ontology_edge_types": edge_count,
+                            "ontology": local_project.ontology,
+                            "analysis_summary": local_project.analysis_summary,
+                            "files": local_project.files,
+                            "total_text_length": local_project.total_text_length,
+                            "use_vertex_search": use_vertex_search,
+                            "gemini_grounding_metadata": (
+                                search_metadata if use_vertex_search else None
+                            ),
+                        },
+                    )
+                except Exception as cp_err:
+                    worker_logger.warning(
+                        "run checkpoint ontology_generated skipped: %s", cp_err
+                    )
+
+                result_payload = _ontology_result_payload(
+                    local_project,
+                    search_metadata=search_metadata,
+                    use_vertex_search=use_vertex_search,
+                )
+                task_manager.update_task(
+                    task_id,
+                    status=TaskStatus.COMPLETED,
+                    progress=100,
+                    message=t(
+                        'progress.ontologyComplete',
+                        entities=entity_count,
+                        edges=edge_count,
+                    ),
+                    result=result_payload,
+                )
+                worker_logger.info(
+                    "=== Ontology generation complete === project_id=%s",
+                    local_project.project_id,
+                )
+
+            except ValueError as e:
+                err_msg = str(e)
+                worker_logger.error("[%s] Ontology generation failed: %s", task_id, err_msg)
+                local_project.status = ProjectStatus.FAILED
+                local_project.error = err_msg
+                local_project.ontology_task_id = None
+                ProjectManager.save_project(local_project)
+                task_manager.update_task(
+                    task_id,
+                    status=TaskStatus.FAILED,
+                    message=t('progress.ontologyFailed', error=err_msg),
+                    error=err_msg,
+                )
+            except Exception as e:
+                worker_logger.exception("[%s] Ontology generation failed", task_id)
+                err_msg = str(e)
+                local_project.status = ProjectStatus.FAILED
+                local_project.error = err_msg
+                local_project.ontology_task_id = None
+                ProjectManager.save_project(local_project)
+                task_manager.update_task(
+                    task_id,
+                    status=TaskStatus.FAILED,
+                    message=t('progress.ontologyFailed', error=err_msg),
+                    error=traceback.format_exc(),
+                )
+
+        thread = threading.Thread(target=ontology_task, daemon=True)
+        thread.start()
+
         return jsonify({
             "success": True,
-            "data": payload
+            "data": {
+                "project_id": project.project_id,
+                "task_id": task_id,
+                "message": t('api.ontologyTaskStarted', taskId=task_id),
+            },
         })
-        
+
     except Exception as e:
-        logger.exception("Ontology generation failed: %s", e)
+        logger.exception("Ontology generation setup failed: %s", e)
+        if project:
+            try:
+                ProjectManager.delete_project(project.project_id)
+            except Exception:
+                pass
         return jsonify({
             "success": False,
             "error": str(e),

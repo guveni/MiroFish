@@ -255,7 +255,10 @@
                 <div class="detail-label">Progress</div>
                 <div class="ontology-progress">
                   <div class="progress-spinner"></div>
-                  <span class="progress-text">{{ ontologyProgress.message }}</span>
+                  <span class="progress-text">
+                    {{ ontologyProgress.message }}
+                    <template v-if="ontologyProgress.progress != null"> ({{ ontologyProgress.progress }}%)</template>
+                  </span>
                 </div>
               </div>
               
@@ -477,6 +480,8 @@ const graphSvg = ref(null)
 
 // polling timers
 let pollTimer = null
+let ontologyPollTimer = null
+let lastOntologyLogMessage = ''
 
 // computed
 const statusClass = computed(() => {
@@ -612,9 +617,9 @@ const handleNewProject = async () => {
   try {
     loading.value = true
     currentPhase.value = 0 // ontology
-    ontologyProgress.value = { message: 'Uploading files and analyzing...' }
+    ontologyProgress.value = { message: 'Uploading files and starting ontology task...', progress: 0 }
+    lastOntologyLogMessage = ''
     
-    // FormData payload
     const formDataObj = new FormData()
     pending.files.forEach(file => {
       formDataObj.append('files', file)
@@ -622,33 +627,34 @@ const handleNewProject = async () => {
     formDataObj.append('simulation_requirement', pending.simulationRequirement)
     formDataObj.append('use_vertex_search', pending.useVertexSearch ? 'true' : 'false')
     
-    // POST ontology/generate
     const response = await generateOntology(formDataObj)
     
-    if (response.success) {
-      // consume pending bucket
+    if (response.success && response.data?.task_id) {
       clearPendingUpload()
-      
-      // bind project snapshot
       currentProjectId.value = response.data.project_id
-      projectData.value = response.data
-      
-      // shallow route update
       router.replace({
         name: 'Process',
         params: { projectId: response.data.project_id }
       })
-      
+      startOntologyPolling(response.data.task_id)
+    } else if (response.success && response.data?.ontology) {
+      clearPendingUpload()
+      currentProjectId.value = response.data.project_id
+      projectData.value = response.data
+      router.replace({
+        name: 'Process',
+        params: { projectId: response.data.project_id }
+      })
       ontologyProgress.value = null
-      
-      // kick off graph job
       await startBuildGraph()
     } else {
       error.value = response.error || 'Ontology generation failed'
+      ontologyProgress.value = { message: error.value, progress: 0 }
     }
   } catch (err) {
     console.error('Handle new project error:', err)
     error.value = 'Project init failed: ' + (err.message || 'Unknown error')
+    ontologyProgress.value = { message: error.value, progress: 0 }
   } finally {
     loading.value = false
   }
@@ -664,8 +670,11 @@ const loadProject = async () => {
       projectData.value = response.data
       updatePhaseByStatus(response.data.status)
       
-      // auto-run graph
-      if (response.data.status === 'ontology_generated' && !response.data.graph_id) {
+      if (response.data.ontology_task_id) {
+        currentPhase.value = 0
+        ontologyProgress.value = { message: 'Resuming ontology generation...', progress: 0 }
+        startOntologyPolling(response.data.ontology_task_id)
+      } else if (response.data.status === 'ontology_generated' && !response.data.graph_id) {
         await startBuildGraph()
       }
       
@@ -706,6 +715,50 @@ const updatePhaseByStatus = (status) => {
     case 'failed':
       error.value = projectData.value?.error || 'Processing failed'
       break
+  }
+}
+
+const stopOntologyPolling = () => {
+  if (ontologyPollTimer) {
+    clearInterval(ontologyPollTimer)
+    ontologyPollTimer = null
+  }
+}
+
+const startOntologyPolling = (taskId) => {
+  pollOntologyTask(taskId)
+  ontologyPollTimer = setInterval(() => pollOntologyTask(taskId), 1500)
+}
+
+const pollOntologyTask = async (taskId) => {
+  try {
+    const response = await getTaskStatus(taskId)
+    if (!response.success) return
+
+    const task = response.data
+    ontologyProgress.value = {
+      message: task.message || 'Processing...',
+      progress: task.progress ?? 0,
+    }
+
+    if (task.message && task.message !== lastOntologyLogMessage) {
+      lastOntologyLogMessage = task.message
+      console.log('[ontology]', task.message)
+    }
+
+    if (task.status === 'completed' && task.result) {
+      stopOntologyPolling()
+      projectData.value = task.result
+      ontologyProgress.value = null
+      await startBuildGraph()
+    } else if (task.status === 'failed') {
+      stopOntologyPolling()
+      ontologyProgress.value = { message: task.error || task.message || 'Failed', progress: 0 }
+      error.value = task.error || task.message || 'Ontology generation failed'
+      console.error('[ontology] failed:', task.error || task.message)
+    }
+  } catch (err) {
+    console.error('[ontology] poll error:', err)
   }
 }
 
@@ -1121,6 +1174,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  stopOntologyPolling()
   stopPolling()
   stopGraphPolling()
 })

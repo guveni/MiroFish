@@ -111,9 +111,18 @@ def main() -> int:
             model=model,
             messages=[{"role": "user", "content": 'Reply with exactly "OK" and nothing else.'}],
             temperature=0,
-            max_tokens=16,
+            max_tokens=256,
         )
-        text = (r.choices[0].message.content or "").strip()
+        message = r.choices[0].message
+        if message is None:
+            finish = getattr(r.choices[0], "finish_reason", None) or "unknown"
+            print(
+                f"FAILED: empty message (finish_reason={finish!r}). "
+                "Try a higher --max-tokens or a smaller model.",
+                file=sys.stderr,
+            )
+            return 1
+        text = (message.content or "").strip()
         print("response:", repr(text))
         usage = getattr(r, "usage", None)
         if usage is not None:

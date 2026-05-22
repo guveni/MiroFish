@@ -80,6 +80,10 @@ class Config:
     ).strip()
     VERTEX_AI_PROJECT_ID = os.environ.get('VERTEX_AI_PROJECT_ID', '')
     VERTEX_AI_LOCATION = (os.environ.get('VERTEX_AI_LOCATION') or '').strip()
+    # Large structured JSON (ontology, profiles). Gemini 3.x on Vertex can exhaust
+    # smaller budgets via internal reasoning before emitting visible content.
+    LLM_JSON_MAX_TOKENS = int(os.environ.get('LLM_JSON_MAX_TOKENS', '8192'))
+    LLM_CHAT_MAX_TOKENS = int(os.environ.get('LLM_CHAT_MAX_TOKENS', '4096'))
 
     # Gemini (Vertex) web search grounding via Google Search, not Discovery Engine.
     # Requires VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT plus VERTEX_AI_LOCATION; uses ADC.

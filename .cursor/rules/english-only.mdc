@@ -1,0 +1,14 @@
+---
+description: English-only source, comments, and UI copy — translate/remove Chinese when editing
+alwaysApply: true
+---
+
+# English-only codebase
+
+When working in this repository:
+
+1. **Write in English** for all new or modified material: comments, docstrings, log messages (unless keyed through i18n), variable names where they are descriptive prose, Markdown, and Cursor chat about this project.
+2. **If you see Chinese** (简体中文/繁体) in source files you touch—inline UI strings, `console.log`/debug text, Vue templates, Python `t()` fallback keys-only paths, prompts, README sections in scope—**replace it with natural English**. Prefer short, UI-appropriate wording.
+3. **Do not introduce new Chinese** into source; keep multilingual product copy in locale JSON (`locales/*.json`) using **English (`en`)** as the authoring reference. This project’s default UX language is English.
+4. **LLM / system prompts** shown to models should be authored in English unless the task explicitly requires another language for end-user generation.
+5. **Exceptions**: preserve third-party quotations, cited user content, legal names, or data that must stay in another language verbatim.

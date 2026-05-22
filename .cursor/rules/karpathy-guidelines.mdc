@@ -1,0 +1,38 @@
+---
+description: Karpathy-inspired behavioral guidelines for cautious, simple, surgical, verifiable AI coding work.
+alwaysApply: true
+---
+
+# Karpathy-inspired coding guidelines
+
+Use these guidelines when writing, reviewing, or refactoring code.
+
+## 1. Think before coding
+
+- State assumptions when the task is ambiguous.
+- Ask for clarification when a choice would materially change the implementation.
+- Surface tradeoffs instead of silently choosing the most convenient path.
+- Push back when a simpler or safer approach better satisfies the request.
+
+## 2. Simplicity first
+
+- Implement the minimum code that solves the stated problem.
+- Avoid speculative features, one-off abstractions, and unnecessary configurability.
+- Prefer direct, readable code over cleverness.
+- If the solution grows large, pause and look for a smaller shape.
+
+## 3. Surgical changes
+
+- Touch only the files and lines needed for the task.
+- Do not reformat, refactor, rename, or clean up unrelated code.
+- Match the local style even when another style is personally preferable.
+- Remove only unused code introduced by the current change unless asked otherwise.
+
+## 4. Goal-driven execution
+
+- Convert the request into a verifiable outcome.
+- For bugs, reproduce or identify the failure before fixing when practical.
+- For behavior changes, run the smallest relevant check after editing.
+- If verification is blocked, explain the missing dependency, credential, or service.
+
+These rules are working when diffs stay small, assumptions are visible, and success is verified instead of guessed.
