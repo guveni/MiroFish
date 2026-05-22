@@ -1007,11 +1007,10 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
         # 使用加速配置
         llm_api_key = boost_api_key
         llm_base_url = boost_base_url
-        llm_model = boost_model or os.environ.get("LLM_MODEL_NAME", "")
+        llm_model = (boost_model or os.environ.get("LLM_MODEL_NAME", "")).strip()
         config_label = "[加速LLM]"
-        # 如果 .env 中没有模型名，则使用 config 作为备用
         if not llm_model:
-            llm_model = config.get("llm_model", "gpt-4o-mini")
+            raise ValueError("使用加速 LLM 时请在 .env 设置 LLM_BOOST_MODEL_NAME 或 LLM_MODEL_NAME")
         os.environ["OPENAI_API_KEY"] = llm_api_key
         if llm_base_url:
             os.environ["OPENAI_API_BASE_URL"] = llm_base_url
@@ -1023,9 +1022,7 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
         )
     elif is_vertex_ai_enabled():
         config_label = "[通用LLM/Vertex]"
-        llm_model, url_display, auth_hint = prepare_camel_openai_env(
-            config.get("llm_model", "gpt-4o-mini")
-        )
+        llm_model, url_display, auth_hint = prepare_camel_openai_env()
         print(
             f"{config_label} model={llm_model}, base_url={url_display}, auth={auth_hint}"
         )
@@ -1033,11 +1030,10 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
         # 使用通用配置
         llm_api_key = os.environ.get("LLM_API_KEY", "")
         llm_base_url = os.environ.get("LLM_BASE_URL", "")
-        llm_model = os.environ.get("LLM_MODEL_NAME", "")
+        llm_model = os.environ.get("LLM_MODEL_NAME", "").strip()
         config_label = "[通用LLM]"
-        # 如果 .env 中没有模型名，则使用 config 作为备用
         if not llm_model:
-            llm_model = config.get("llm_model", "gpt-4o-mini")
+            raise ValueError("请在项目根目录 .env 设置 LLM_MODEL_NAME")
         if llm_api_key:
             os.environ["OPENAI_API_KEY"] = llm_api_key
         if not os.environ.get("OPENAI_API_KEY"):

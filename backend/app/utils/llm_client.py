@@ -1,15 +1,13 @@
-"""
-LLM客户端封装
-统一使用OpenAI格式调用
-"""
+"""Provider-neutral LLM client."""
 
 import json
 import re
 from typing import Optional, Dict, Any, List
-from openai import OpenAI
+from openai import AzureOpenAI, OpenAI
 
 from ..config import Config
-from .openai_tracing import wrap_openai_client
+from .openai_tracing import attach_completion_usage_metadata, wrap_openai_client
+from .pipeline_retry import run_pipeline_step
 from .vertex_openai import (
     effective_llm_api_key_or_vertex_token,
     effective_llm_base_url,
@@ -19,7 +17,7 @@ from .vertex_openai import (
 
 
 class LLMClient:
-    """LLM客户端"""
+    """Small OpenAI-compatible facade for OpenAI, Azure OpenAI, and Vertex."""
     
     def __init__(
         self,
@@ -27,25 +25,49 @@ class LLMClient:
         base_url: Optional[str] = None,
         model: Optional[str] = None
     ):
-        self._vertex = is_vertex_ai_enabled()
+        self.provider = (Config.LLM_PROVIDER or "openai").strip().lower()
+        self._vertex = self.provider == "vertex" or is_vertex_ai_enabled()
+        self._azure = self.provider == "azure"
         resolved_base = base_url or (
             effective_llm_base_url() if self._vertex else None
-        ) or Config.LLM_BASE_URL
+        ) or (None if self._azure else Config.LLM_BASE_URL)
         self.base_url = resolved_base
-        self.model = model or Config.LLM_MODEL_NAME
+        self.model = model or (
+            Config.AZURE_OPENAI_DEPLOYMENT
+            if self._azure
+            else Config.require_llm_model_name()
+        )
         self.api_key = api_key
 
-        if not self._vertex and not (self.api_key or Config.LLM_API_KEY):
-            raise ValueError("LLM_API_KEY 未配置")
+        if self.provider not in ("openai", "azure", "vertex"):
+            raise ValueError("LLM_PROVIDER must be one of: openai, azure, vertex")
+
+        if self._azure:
+            if not Config.AZURE_OPENAI_ENDPOINT:
+                raise ValueError("AZURE_OPENAI_ENDPOINT is not configured")
+            if not (self.api_key or Config.AZURE_OPENAI_API_KEY):
+                raise ValueError("AZURE_OPENAI_API_KEY is not configured")
+            if not self.model:
+                raise ValueError("AZURE_OPENAI_DEPLOYMENT is not configured")
+        elif not self._vertex and not (self.api_key or Config.LLM_API_KEY):
+            raise ValueError("LLM_API_KEY is not configured")
 
         if self._vertex and not vertex_config_present():
             raise ValueError(
-                "Vertex AI：无法解析 openapi 基础 URL（检查 VERTEX_AI_PROJECT_ID / "
-                "VERTEX_AI_LOCATION 或 LLM_BASE_URL）"
+                "Vertex AI OpenAPI base URL could not be resolved. Check "
+                "VERTEX_AI_PROJECT_ID / VERTEX_AI_LOCATION or LLM_BASE_URL."
             )
 
         self.client: Optional[OpenAI] = None
-        if not self._vertex:
+        if self._azure:
+            self.client = wrap_openai_client(
+                AzureOpenAI(
+                    api_key=self.api_key or Config.AZURE_OPENAI_API_KEY,
+                    azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
+                    api_version=Config.AZURE_OPENAI_API_VERSION,
+                )
+            )
+        elif not self._vertex:
             self.client = wrap_openai_client(
                 OpenAI(
                     api_key=self.api_key or Config.LLM_API_KEY,
@@ -67,18 +89,7 @@ class LLMClient:
         max_tokens: int = 4096,
         response_format: Optional[Dict] = None
     ) -> str:
-        """
-        发送聊天请求
-        
-        Args:
-            messages: 消息列表
-            temperature: 温度参数
-            max_tokens: 最大token数
-            response_format: 响应格式（如JSON模式）
-            
-        Returns:
-            模型响应文本
-        """
+        """Send a chat completion request and return text content."""
         kwargs = {
             "model": self.model,
             "messages": messages,
@@ -89,9 +100,18 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
-        response = self._active_client().chat.completions.create(**kwargs)
-        content = response.choices[0].message.content
-        # 部分模型（如MiniMax M2.5）会在content中包含<think>思考内容，需要移除
+        def _complete():
+            client = self._active_client()
+            return client.chat.completions.create(**kwargs)
+
+        response = run_pipeline_step(
+            f"llm_chat_{self.provider}_{self.model}",
+            _complete,
+            retry_unknown_errors=False,
+        )
+        attach_completion_usage_metadata(response, model=self.model)
+        content = response.choices[0].message.content or ""
+        # Some models include hidden reasoning tags in content; remove them.
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
         return content
     
@@ -101,24 +121,14 @@ class LLMClient:
         temperature: float = 0.3,
         max_tokens: int = 4096
     ) -> Dict[str, Any]:
-        """
-        发送聊天请求并返回JSON
-        
-        Args:
-            messages: 消息列表
-            temperature: 温度参数
-            max_tokens: 最大token数
-            
-        Returns:
-            解析后的JSON对象
-        """
+        """Send a chat request and parse a JSON object from the response."""
         response = self.chat(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
             response_format={"type": "json_object"}
         )
-        # 清理markdown代码块标记
+        # Strip Markdown code fences that some providers add despite JSON mode.
         cleaned_response = response.strip()
         cleaned_response = re.sub(r'^```(?:json)?\s*\n?', '', cleaned_response, flags=re.IGNORECASE)
         cleaned_response = re.sub(r'\n?```\s*$', '', cleaned_response)
@@ -127,5 +137,4 @@ class LLMClient:
         try:
             return json.loads(cleaned_response)
         except json.JSONDecodeError:
-            raise ValueError(f"LLM返回的JSON格式无效: {cleaned_response}")
-
+            raise ValueError(f"LLM returned invalid JSON: {cleaned_response}")

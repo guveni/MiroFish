@@ -21,7 +21,10 @@ def _truthy(env_val: Optional[str]) -> bool:
 
 
 def is_vertex_ai_enabled() -> bool:
-    return _truthy(os.environ.get("LLM_USE_VERTEX_AI"))
+    return (
+        (os.environ.get("LLM_PROVIDER") or "").strip().lower() == "vertex"
+        or _truthy(os.environ.get("LLM_USE_VERTEX_AI"))
+    )
 
 
 def _vertex_project_id() -> Optional[str]:
@@ -33,7 +36,8 @@ def _vertex_project_id() -> Optional[str]:
 
 
 def _vertex_location() -> str:
-    return (os.environ.get("VERTEX_AI_LOCATION") or "us-central1").strip()
+    """Unset when synthesizing openapi URL yields no URL (explicit LLM_BASE_URL may omit this)."""
+    return (os.environ.get("VERTEX_AI_LOCATION") or "").strip()
 
 
 def _looks_like_vertex_openapi_endpoint(url: str) -> bool:
@@ -63,6 +67,8 @@ def vertex_openapi_base_url() -> Optional[str]:
     project = _vertex_project_id()
     location = _vertex_location()
     if not project:
+        return None
+    if not location:
         return None
     api_version = (os.environ.get("VERTEX_AI_OPENAI_API_VERSION") or "v1").strip().lstrip("/")
     if api_version not in ("v1", "v1beta1"):
@@ -118,7 +124,7 @@ def effective_llm_api_key_or_vertex_token(static_key: Optional[str] = None) -> s
     return key or ""
 
 
-def prepare_camel_openai_env(sim_config_fallback_model: str = "gpt-4o-mini") -> Tuple[str, str, str]:
+def prepare_camel_openai_env() -> Tuple[str, str, str]:
     """
     Populate OPENAI_API_KEY / OPENAI_API_BASE_URL for camel-ai ModelFactory.
     Call before ModelFactory.create().
@@ -126,7 +132,9 @@ def prepare_camel_openai_env(sim_config_fallback_model: str = "gpt-4o-mini") -> 
     Returns:
         (llm_model_name, llm_base_url_display, hint for logs)
     """
-    llm_model = os.environ.get("LLM_MODEL_NAME", "") or sim_config_fallback_model
+    llm_model = os.environ.get("LLM_MODEL_NAME", "").strip()
+    if not llm_model:
+        raise ValueError("LLM_MODEL_NAME must be explicitly configured in .env")
 
     base = effective_llm_base_url()
     token_or_key = effective_llm_api_key_or_vertex_token()

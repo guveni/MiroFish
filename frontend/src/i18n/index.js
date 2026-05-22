@@ -3,6 +3,8 @@ import languages from '../../../locales/languages.json'
 
 const localeFiles = import.meta.glob('../../../locales/!(languages).json', { eager: true })
 
+const DEFAULT_LOCALE = 'en'
+
 const messages = {}
 const availableLocales = []
 
@@ -14,12 +16,16 @@ for (const path in localeFiles) {
   }
 }
 
-const savedLocale = localStorage.getItem('locale') || 'zh'
+let savedLocale = localStorage.getItem('locale') || DEFAULT_LOCALE
+if (!(savedLocale in messages)) {
+  savedLocale = DEFAULT_LOCALE
+  localStorage.setItem('locale', savedLocale)
+}
 
 const i18n = createI18n({
   legacy: false,
   locale: savedLocale,
-  fallbackLocale: 'zh',
+  fallbackLocale: DEFAULT_LOCALE,
   messages
 })
 

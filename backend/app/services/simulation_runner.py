@@ -23,6 +23,7 @@ from ..utils.logger import get_logger
 from ..utils.locale import get_locale, set_locale
 from .zep_graph_memory_updater import ZepGraphMemoryManager
 from .simulation_ipc import SimulationIPCClient, CommandType, IPCResponse
+from .run_checkpoint_store import checkpoint_simulation_stage
 
 logger = get_logger('mirofish.simulation_runner')
 
@@ -226,6 +227,20 @@ class SimulationRunner:
     
     # 图谱记忆更新配置
     _graph_memory_enabled: Dict[str, bool] = {}  # simulation_id -> enabled
+
+    @classmethod
+    def _project_id_from_simulation_workspace(cls, simulation_id: str) -> Optional[str]:
+        """Read project_id saved by SimulationManager.prepare (state.json)."""
+        fp = os.path.join(cls.RUN_STATE_DIR, simulation_id, "state.json")
+        if not os.path.isfile(fp):
+            return None
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            pid = (data.get("project_id") or "").strip()
+            return pid or None
+        except Exception:
+            return None
     
     @classmethod
     def get_run_state(cls, simulation_id: str) -> Optional[SimulationRunState]:
@@ -469,17 +484,45 @@ class SimulationRunner:
             cls._monitor_threads[simulation_id] = monitor_thread
             
             logger.info(f"模拟启动成功: {simulation_id}, pid={process.pid}, platform={platform}")
-            
+            proj = cls._project_id_from_simulation_workspace(simulation_id)
+            if proj:
+                try:
+                    checkpoint_simulation_stage(
+                        simulation_id,
+                        proj,
+                        "runner_started",
+                        {
+                            "platform": platform,
+                            "pid": process.pid,
+                            "total_rounds": state.total_rounds,
+                            "graph_memory": bool(enable_graph_memory_update),
+                        },
+                    )
+                except Exception as cp_err:
+                    logger.warning("checkpoint runner_started skipped: %s", cp_err)
+
         except Exception as e:
             state.runner_status = RunnerStatus.FAILED
             state.error = str(e)
             cls._save_run_state(state)
+            proj_fail = cls._project_id_from_simulation_workspace(simulation_id)
+            if proj_fail:
+                try:
+                    checkpoint_simulation_stage(
+                        simulation_id,
+                        proj_fail,
+                        "runner_start_failed",
+                        {"simulation_id": simulation_id},
+                        error=str(e),
+                    )
+                except Exception as cp_err:
+                    logger.warning("checkpoint runner_start_failed skipped: %s", cp_err)
             raise
         
         return state
     
     @classmethod
-    def _monitor_simulation(cls, simulation_id: str, locale: str = 'zh'):
+    def _monitor_simulation(cls, simulation_id: str, locale: str = 'en'):
         """监控模拟进程，解析动作日志"""
         set_locale(locale)
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
@@ -545,12 +588,51 @@ class SimulationRunner:
             state.twitter_running = False
             state.reddit_running = False
             cls._save_run_state(state)
+            proj_end = cls._project_id_from_simulation_workspace(simulation_id)
+            if proj_end and state.runner_status in (
+                RunnerStatus.COMPLETED,
+                RunnerStatus.FAILED,
+            ):
+                try:
+                    ck_stage = (
+                        "runner_completed"
+                        if state.runner_status == RunnerStatus.COMPLETED
+                        else "runner_failed"
+                    )
+                    checkpoint_simulation_stage(
+                        simulation_id,
+                        proj_end,
+                        ck_stage,
+                        {
+                            "exit_code": exit_code,
+                            "twitter_completed": state.twitter_completed,
+                            "reddit_completed": state.reddit_completed,
+                            "current_round": state.current_round,
+                        },
+                        error=state.error
+                        if state.runner_status == RunnerStatus.FAILED
+                        else None,
+                    )
+                except Exception as cp_err:
+                    logger.warning("checkpoint runner terminal skipped: %s", cp_err)
             
         except Exception as e:
             logger.error(f"监控线程异常: {simulation_id}, error={str(e)}")
             state.runner_status = RunnerStatus.FAILED
             state.error = str(e)
             cls._save_run_state(state)
+            proj_ex = cls._project_id_from_simulation_workspace(simulation_id)
+            if proj_ex:
+                try:
+                    checkpoint_simulation_stage(
+                        simulation_id,
+                        proj_ex,
+                        "runner_failed",
+                        {"simulation_id": simulation_id},
+                        error=str(e),
+                    )
+                except Exception as cp_err:
+                    logger.warning("checkpoint runner monitor exception skipped: %s", cp_err)
         
         finally:
             # 停止图谱记忆更新器

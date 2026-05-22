@@ -102,6 +102,44 @@
               </span>
             </div>
           </div>
+
+          <div v-if="groundingMetadata" class="grounding-panel" :class="{ 'dimmed': selectedOntologyItem }">
+            <div class="grounding-header">
+              <span class="tag-label">WEB SEARCH / GROUNDING</span>
+              <span v-if="groundingMetadata.grounding_model" class="grounding-model">
+                {{ groundingMetadata.grounding_model }}
+              </span>
+            </div>
+            <div class="grounding-metrics">
+              <span v-if="groundingMetadata.unique_source_uri_count != null">
+                {{ groundingMetadata.unique_source_uri_count }} source URIs
+              </span>
+              <span v-if="groundingMetadata.web_search_chars != null">
+                {{ groundingMetadata.web_search_chars }} chars
+              </span>
+            </div>
+            <div v-if="groundingMetadata.queries_detail?.length" class="grounding-query-list">
+              <div
+                v-for="(row, qi) in groundingMetadata.queries_detail"
+                :key="qi"
+                class="grounding-query"
+              >
+                <div class="grounding-query-text">{{ row.query }}</div>
+                <div v-if="row.sources?.length" class="grounding-sources">
+                  <a
+                    v-for="(source, si) in row.sources.slice(0, 5)"
+                    :key="si"
+                    :href="source.uri"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {{ source.title || source.uri }}
+                  </a>
+                </div>
+                <div v-else-if="row.error" class="grounding-error">{{ row.error }}</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -209,6 +247,10 @@ defineEmits(['next-step'])
 const selectedOntologyItem = ref(null)
 const logContent = ref(null)
 const creatingSimulation = ref(false)
+
+const groundingMetadata = computed(() => (
+  props.projectData?.gemini_grounding_metadata || props.projectData?.search_metadata || null
+))
 
 // 进入环境搭建 - 创建 simulation 并跳转
 const handleEnterEnvSetup = async () => {
@@ -407,6 +449,99 @@ watch(() => props.systemLogs.length, () => {
 .entity-tag.clickable:hover {
     background: #E0E0E0;
     border-color: #CCC;
+}
+
+.grounding-panel {
+  margin-top: 14px;
+  padding: 12px;
+  background: #F7FBF9;
+  border: 1px solid #DCEFE6;
+  border-radius: 6px;
+  transition: opacity 0.3s;
+}
+
+.grounding-panel.dimmed {
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+.grounding-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.grounding-header .tag-label {
+  margin-bottom: 0;
+}
+
+.grounding-model {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: #1A7047;
+  background: #E8F5EF;
+  border: 1px solid #C8E7D8;
+  padding: 2px 6px;
+  border-radius: 4px;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grounding-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 10px;
+  color: #66736D;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.grounding-query-list {
+  margin-top: 10px;
+  max-height: 210px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.grounding-query {
+  padding-top: 8px;
+  border-top: 1px solid #E3F0EA;
+}
+
+.grounding-query-text {
+  font-size: 11px;
+  color: #222;
+  line-height: 1.35;
+}
+
+.grounding-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.grounding-sources a {
+  font-size: 10px;
+  color: #1A7047;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.grounding-sources a:hover {
+  text-decoration: underline;
+}
+
+.grounding-error {
+  margin-top: 6px;
+  font-size: 10px;
+  color: #B34747;
 }
 
 /* Ontology Detail Overlay */

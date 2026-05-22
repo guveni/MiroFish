@@ -2,12 +2,10 @@
 """
 One-shot check: Gemini on Vertex responds (OpenAI-compatible endpoint + ADC).
 
-Reads repo-root .env for LLM_USE_VERTEX_AI / VERTEX_AI_PROJECT_ID / defaults.
-CLI flags override .env for region/model without load_dotenv(override=True) issues.
+Reads repo-root .env for LLM_USE_VERTEX_AI / VERTEX_AI_PROJECT_ID / LLM_MODEL_NAME / VERTEX_AI_LOCATION.
 
 Usage (from repo root):
   cd backend && uv run python scripts/verify_gemini_vertex.py
-  cd backend && uv run python scripts/verify_gemini_vertex.py --region us-central1 --model google/gemini-2.0-flash-001
 """
 
 from __future__ import annotations
@@ -42,9 +40,21 @@ def _parse_env_file(path: Path) -> dict[str, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Verify Vertex Gemini chat completion")
-    ap.add_argument("--region", default=None, help="Vertex region (default: from .env or us-central1)")
-    ap.add_argument("--model", default=None, help="Model id with google/ prefix")
-    ap.add_argument("--project", default=None, help="GCP project id (default: .env VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT)")
+    ap.add_argument(
+        "--region",
+        default=None,
+        help="Vertex region（覆盖 .env 中的 VERTEX_AI_LOCATION）",
+    )
+    ap.add_argument(
+        "--model",
+        default=None,
+        help="模型 id（须带 google/ 前缀）；默认来自 .env 的 LLM_MODEL_NAME（必填）",
+    )
+    ap.add_argument(
+        "--project",
+        default=None,
+        help="GCP project id（默认 .env VERTEX_AI_PROJECT_ID 或 GOOGLE_CLOUD_PROJECT）",
+    )
     args = ap.parse_args()
 
     env = _parse_env_file(_env_file)
@@ -57,8 +67,15 @@ def main() -> int:
         print("Set VERTEX_AI_PROJECT_ID (or pass --project) to a real GCP project id.", file=sys.stderr)
         return 2
 
-    region = (args.region or env.get("VERTEX_AI_LOCATION") or "us-central1").strip()
-    model = (args.model or env.get("LLM_MODEL_NAME") or "google/gemini-2.5-flash").strip()
+    region = (args.region or env.get("VERTEX_AI_LOCATION") or "").strip()
+    if not region:
+        print("Set VERTEX_AI_LOCATION in .env (e.g. us-central1 or global).", file=sys.stderr)
+        return 2
+
+    model = (args.model or env.get("LLM_MODEL_NAME") or "").strip()
+    if not model:
+        print("Set LLM_MODEL_NAME in .env (e.g. google/gemini-3.1-flash-lite).", file=sys.stderr)
+        return 2
 
     api_version = (env.get("VERTEX_AI_OPENAI_API_VERSION") or "v1").strip().lstrip("/")
     if api_version not in ("v1", "v1beta1"):
@@ -98,6 +115,10 @@ def main() -> int:
         )
         text = (r.choices[0].message.content or "").strip()
         print("response:", repr(text))
+        usage = getattr(r, "usage", None)
+        if usage is not None:
+            dump = getattr(usage, "model_dump", None)
+            print("usage:", dump() if callable(dump) else usage)
         return 0
     except Exception as e:
         print("FAILED:", e, file=sys.stderr)

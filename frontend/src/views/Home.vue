@@ -165,6 +165,15 @@
                   </div>
                 </div>
               </div>
+              <label class="vertex-search-option">
+                <input
+                  v-model="useVertexSearch"
+                  type="checkbox"
+                  :disabled="loading"
+                />
+                <span>{{ $t('home.vertexSearchToggle') }}</span>
+              </label>
+              <p class="vertex-search-hint">{{ $t('home.vertexSearchHint') }}</p>
             </div>
 
             <!-- 分割线 -->
@@ -216,6 +225,7 @@ import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
+import { setPendingUpload } from '../store/pendingUpload.js'
 
 const router = useRouter()
 
@@ -226,6 +236,7 @@ const formData = ref({
 
 // 文件列表
 const files = ref([])
+const useVertexSearch = ref(false)
 
 // 状态
 const loading = ref(false)
@@ -237,7 +248,9 @@ const fileInput = ref(null)
 
 // 计算属性:是否可以提交
 const canSubmit = computed(() => {
-  return formData.value.simulationRequirement.trim() !== '' && files.value.length > 0
+  const hasPrompt = formData.value.simulationRequirement.trim() !== ''
+  const hasSeed = files.value.length > 0 || useVertexSearch.value
+  return hasPrompt && hasSeed
 })
 
 // 触发文件选择
@@ -297,16 +310,14 @@ const scrollToBottom = () => {
 // 开始模拟 - 立即跳转，API调用在Process页面进行
 const startSimulation = () => {
   if (!canSubmit.value || loading.value) return
-  
+
   // 存储待上传的数据
-  import('../store/pendingUpload.js').then(({ setPendingUpload }) => {
-    setPendingUpload(files.value, formData.value.simulationRequirement)
-    
-    // 立即跳转到Process页面（使用特殊标识表示新建项目）
-    router.push({
-      name: 'Process',
-      params: { projectId: 'new' }
-    })
+  setPendingUpload(files.value, formData.value.simulationRequirement, useVertexSearch.value)
+
+  // 立即跳转到Process页面（使用特殊标识表示新建项目）
+  router.push({
+    name: 'Process',
+    params: { projectId: 'new' }
   })
 }
 </script>
@@ -320,9 +331,8 @@ const startSimulation = () => {
   --gray-light: #F5F5F5;
   --gray-text: #666666;
   --border: #E5E5E5;
-  /* 
-    使用 Space Grotesk 作为主要标题字体，JetBrains Mono 作为代码/标签字体
-    确保已在 index.html 引入这些 Google Fonts 
+  /*
+    Space Grotesk for headings, JetBrains Mono for code — loaded via index.html fonts link.
   */
   --font-mono: 'JetBrains Mono', monospace;
   --font-sans: 'Space Grotesk', 'Noto Sans SC', system-ui, sans-serif;
@@ -713,6 +723,27 @@ const startSimulation = () => {
 .upload-zone:hover {
   background: #F0F0F0;
   border-color: #999;
+}
+
+.vertex-search-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  font-size: 0.85rem;
+  color: var(--gray-text);
+  cursor: pointer;
+}
+
+.vertex-search-option input {
+  margin-top: 2px;
+}
+
+.vertex-search-hint {
+  margin: 8px 0 0 0;
+  font-size: 0.75rem;
+  color: #999;
+  line-height: 1.4;
 }
 
 .upload-placeholder {

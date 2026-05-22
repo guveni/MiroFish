@@ -1,18 +1,20 @@
 /**
- * 临时存储待上传的文件和需求
- * 用于首页点击启动引擎后立即跳转，在Process页面再进行API调用
+ * Holds pending files and simulation text after "Start" on Home;
+ * Process.vue performs the ontology API once mounted.
  */
 import { reactive } from 'vue'
 
 const state = reactive({
   files: [],
   simulationRequirement: '',
+  useVertexSearch: false,
   isPending: false
 })
 
-export function setPendingUpload(files, requirement) {
+export function setPendingUpload(files, requirement, useVertexSearch = false) {
   state.files = files
   state.simulationRequirement = requirement
+  state.useVertexSearch = Boolean(useVertexSearch)
   state.isPending = true
 }
 
@@ -20,6 +22,7 @@ export function getPendingUpload() {
   return {
     files: state.files,
     simulationRequirement: state.simulationRequirement,
+    useVertexSearch: state.useVertexSearch,
     isPending: state.isPending
   }
 }
@@ -27,6 +30,7 @@ export function getPendingUpload() {
 export function clearPendingUpload() {
   state.files = []
   state.simulationRequirement = ''
+  state.useVertexSearch = false
   state.isPending = false
 }
 

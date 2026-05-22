@@ -193,21 +193,22 @@ const initProject = async () => {
 
 const handleNewProject = async () => {
   const pending = getPendingUpload()
-  if (!pending.isPending || pending.files.length === 0) {
-    error.value = 'No pending files found.'
-    addLog('Error: No pending files found for new project.')
+  if (!pending.isPending || (pending.files.length === 0 && !pending.useVertexSearch)) {
+    error.value = 'No pending seed data (add files or enable Gemini web search).'
+    addLog('Error: No pending files or Gemini web search flag for new project.')
     return
   }
   
   try {
     loading.value = true
     currentPhase.value = 0
-    ontologyProgress.value = { message: 'Uploading and analyzing docs...' }
-    addLog('Starting ontology generation: Uploading files...')
+    ontologyProgress.value = { message: 'Preparing seed context...' }
+    addLog('Starting ontology generation: preparing seed context...')
     
     const formData = new FormData()
     pending.files.forEach(f => formData.append('files', f))
     formData.append('simulation_requirement', pending.simulationRequirement)
+    formData.append('use_vertex_search', pending.useVertexSearch ? 'true' : 'false')
     
     const res = await generateOntology(formData)
     if (res.success) {

@@ -48,6 +48,9 @@ class Project:
     simulation_requirement: Optional[str] = None
     chunk_size: int = 500
     chunk_overlap: int = 50
+
+    # Gemini 联网检索原始元数据（query、sources、usage 等）；仅启用 Vertex Search 后有值
+    gemini_grounding_metadata: Optional[Dict[str, Any]] = None
     
     # 错误信息
     error: Optional[str] = None
@@ -69,6 +72,7 @@ class Project:
             "simulation_requirement": self.simulation_requirement,
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
+            "gemini_grounding_metadata": self.gemini_grounding_metadata,
             "error": self.error
         }
     
@@ -94,6 +98,7 @@ class Project:
             simulation_requirement=data.get('simulation_requirement'),
             chunk_size=data.get('chunk_size', 500),
             chunk_overlap=data.get('chunk_overlap', 50),
+            gemini_grounding_metadata=data.get('gemini_grounding_metadata'),
             error=data.get('error')
         )
 

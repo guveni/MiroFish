@@ -1,7 +1,7 @@
 """
-OASIS模拟管理器
-管理Twitter和Reddit双平台并行模拟
-使用预设脚本 + LLM智能生成配置参数
+OASIS simulation manager.
+Manages parallel Twitter and Reddit simulations using preset scripts and
+LLM-generated configuration parameters.
 """
 
 import os
@@ -14,69 +14,81 @@ from enum import Enum
 
 from ..config import Config
 from ..utils.logger import get_logger
+from ..utils.pipeline_retry import run_pipeline_step
+from .run_checkpoint_store import (
+    checkpoint_simulation_stage,
+    load_simulation_stage_checkpoint,
+)
 from .zep_entity_reader import ZepEntityReader, FilteredEntities
 from .oasis_profile_generator import OasisProfileGenerator, OasisAgentProfile
-from .simulation_config_generator import SimulationConfigGenerator, SimulationParameters
+from .simulation_config_generator import (
+    AgentActivityConfig,
+    EventConfig,
+    PlatformConfig,
+    SimulationConfigGenerator,
+    SimulationParameters,
+    TimeSimulationConfig,
+)
 from ..utils.locale import t
 
 logger = get_logger('mirofish.simulation')
 
 
 class SimulationStatus(str, Enum):
-    """模拟状态"""
+    """Simulation status."""
     CREATED = "created"
     PREPARING = "preparing"
     READY = "ready"
     RUNNING = "running"
     PAUSED = "paused"
-    STOPPED = "stopped"      # 模拟被手动停止
-    COMPLETED = "completed"  # 模拟自然完成
+    STOPPED = "stopped"
+    COMPLETED = "completed"
     FAILED = "failed"
 
 
 class PlatformType(str, Enum):
-    """平台类型"""
+    """Platform type."""
     TWITTER = "twitter"
     REDDIT = "reddit"
 
 
 @dataclass
 class SimulationState:
-    """模拟状态"""
+    """Simulation state."""
     simulation_id: str
     project_id: str
     graph_id: str
     
-    # 平台启用状态
+    # Enabled platforms.
     enable_twitter: bool = True
     enable_reddit: bool = True
     
-    # 状态
+    # Status.
     status: SimulationStatus = SimulationStatus.CREATED
     
-    # 准备阶段数据
+    # Preparation data.
     entities_count: int = 0
     profiles_count: int = 0
     entity_types: List[str] = field(default_factory=list)
     
-    # 配置生成信息
+    # Configuration generation info.
     config_generated: bool = False
     config_reasoning: str = ""
     
-    # 运行时数据
+    # Runtime data.
     current_round: int = 0
     twitter_status: str = "not_started"
     reddit_status: str = "not_started"
     
-    # 时间戳
+    # Timestamps.
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
     
-    # 错误信息
+    # Error info.
     error: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
-        """完整状态字典（内部使用）"""
+        """Full internal state dictionary."""
         return {
             "simulation_id": self.simulation_id,
             "project_id": self.project_id,
@@ -98,7 +110,7 @@ class SimulationState:
         }
     
     def to_simple_dict(self) -> Dict[str, Any]:
-        """简化状态字典（API返回使用）"""
+        """Simplified state dictionary for API responses."""
         return {
             "simulation_id": self.simulation_id,
             "project_id": self.project_id,
@@ -114,36 +126,36 @@ class SimulationState:
 
 class SimulationManager:
     """
-    模拟管理器
+    Simulation manager.
     
-    核心功能：
-    1. 从Zep图谱读取实体并过滤
-    2. 生成OASIS Agent Profile
-    3. 使用LLM智能生成模拟配置参数
-    4. 准备预设脚本所需的所有文件
+    Responsibilities:
+    1. Read and filter entities from the Zep graph.
+    2. Generate OASIS Agent Profiles.
+    3. Generate simulation parameters with the LLM.
+    4. Prepare the files required by preset scripts.
     """
     
-    # 模拟数据存储目录
+    # Simulation data directory.
     SIMULATION_DATA_DIR = os.path.join(
         os.path.dirname(__file__), 
         '../../uploads/simulations'
     )
     
     def __init__(self):
-        # 确保目录存在
+        # Ensure the directory exists.
         os.makedirs(self.SIMULATION_DATA_DIR, exist_ok=True)
         
-        # 内存中的模拟状态缓存
+        # In-memory simulation state cache.
         self._simulations: Dict[str, SimulationState] = {}
     
     def _get_simulation_dir(self, simulation_id: str) -> str:
-        """获取模拟数据目录"""
+        """Return the simulation data directory."""
         sim_dir = os.path.join(self.SIMULATION_DATA_DIR, simulation_id)
         os.makedirs(sim_dir, exist_ok=True)
         return sim_dir
     
     def _save_simulation_state(self, state: SimulationState):
-        """保存模拟状态到文件"""
+        """Save simulation state to disk."""
         sim_dir = self._get_simulation_dir(state.simulation_id)
         state_file = os.path.join(sim_dir, "state.json")
         
@@ -155,7 +167,7 @@ class SimulationManager:
         self._simulations[state.simulation_id] = state
     
     def _load_simulation_state(self, simulation_id: str) -> Optional[SimulationState]:
-        """从文件加载模拟状态"""
+        """Load simulation state from disk."""
         if simulation_id in self._simulations:
             return self._simulations[simulation_id]
         
@@ -190,6 +202,80 @@ class SimulationManager:
         
         self._simulations[simulation_id] = state
         return state
+
+    @staticmethod
+    def _entity_node_from_dict(data: Dict[str, Any]):
+        from .zep_entity_reader import EntityNode
+
+        return EntityNode(
+            uuid=data.get("uuid", ""),
+            name=data.get("name", ""),
+            labels=data.get("labels", []),
+            summary=data.get("summary", ""),
+            attributes=data.get("attributes", {}),
+            related_edges=data.get("related_edges", []),
+            related_nodes=data.get("related_nodes", []),
+        )
+
+    @classmethod
+    def _filtered_entities_from_payload(
+        cls,
+        payload: Dict[str, Any],
+    ) -> Optional[FilteredEntities]:
+        data = payload.get("filtered_entities")
+        if not isinstance(data, dict):
+            return None
+        entities = [
+            cls._entity_node_from_dict(item)
+            for item in data.get("entities", [])
+            if isinstance(item, dict)
+        ]
+        return FilteredEntities(
+            entities=entities,
+            entity_types=set(data.get("entity_types", [])),
+            total_count=int(data.get("total_count", len(entities))),
+            filtered_count=int(data.get("filtered_count", len(entities))),
+        )
+
+    @staticmethod
+    def _profile_from_dict(data: Dict[str, Any]) -> OasisAgentProfile:
+        allowed = OasisAgentProfile.__dataclass_fields__.keys()
+        return OasisAgentProfile(**{k: v for k, v in data.items() if k in allowed})
+
+    @staticmethod
+    def _simulation_params_from_payload(
+        payload: Dict[str, Any],
+    ) -> Optional[SimulationParameters]:
+        data = payload.get("simulation_parameters")
+        if not isinstance(data, dict):
+            return None
+        return SimulationParameters(
+            simulation_id=data.get("simulation_id", ""),
+            project_id=data.get("project_id", ""),
+            graph_id=data.get("graph_id", ""),
+            simulation_requirement=data.get("simulation_requirement", ""),
+            time_config=TimeSimulationConfig(**data.get("time_config", {})),
+            agent_configs=[
+                AgentActivityConfig(**item)
+                for item in data.get("agent_configs", [])
+                if isinstance(item, dict)
+            ],
+            event_config=EventConfig(**data.get("event_config", {})),
+            twitter_config=(
+                PlatformConfig(**data["twitter_config"])
+                if isinstance(data.get("twitter_config"), dict)
+                else None
+            ),
+            reddit_config=(
+                PlatformConfig(**data["reddit_config"])
+                if isinstance(data.get("reddit_config"), dict)
+                else None
+            ),
+            llm_model=data.get("llm_model", ""),
+            llm_base_url=data.get("llm_base_url", ""),
+            generated_at=data.get("generated_at", datetime.now().isoformat()),
+            generation_reasoning=data.get("generation_reasoning", ""),
+        )
     
     def create_simulation(
         self,
@@ -199,13 +285,13 @@ class SimulationManager:
         enable_reddit: bool = True,
     ) -> SimulationState:
         """
-        创建新的模拟
+        Create a new simulation.
         
         Args:
-            project_id: 项目ID
-            graph_id: Zep图谱ID
-            enable_twitter: 是否启用Twitter模拟
-            enable_reddit: 是否启用Reddit模拟
+            project_id: Project ID.
+            graph_id: Zep graph ID.
+            enable_twitter: Whether Twitter simulation is enabled.
+            enable_reddit: Whether Reddit simulation is enabled.
             
         Returns:
             SimulationState
@@ -223,7 +309,7 @@ class SimulationManager:
         )
         
         self._save_simulation_state(state)
-        logger.info(f"创建模拟: {simulation_id}, project={project_id}, graph={graph_id}")
+        logger.info("Created simulation: %s, project=%s, graph=%s", simulation_id, project_id, graph_id)
         
         return state
     
@@ -238,51 +324,70 @@ class SimulationManager:
         parallel_profile_count: int = 3
     ) -> SimulationState:
         """
-        准备模拟环境（全程自动化）
+        Prepare the simulation environment end to end.
         
-        步骤：
-        1. 从Zep图谱读取并过滤实体
-        2. 为每个实体生成OASIS Agent Profile（可选LLM增强，支持并行）
-        3. 使用LLM智能生成模拟配置参数（时间、活跃度、发言频率等）
-        4. 保存配置文件和Profile文件
-        5. 复制预设脚本到模拟目录
+        Steps:
+        1. Read and filter entities from the Zep graph.
+        2. Generate OASIS Agent Profiles, optionally LLM-enhanced and parallelized.
+        3. Generate simulation configuration.
+        4. Save configuration and profile files.
+        5. Prepare the preset script environment.
         
         Args:
-            simulation_id: 模拟ID
-            simulation_requirement: 模拟需求描述（用于LLM生成配置）
-            document_text: 原始文档内容（用于LLM理解背景）
-            defined_entity_types: 预定义的实体类型（可选）
-            use_llm_for_profiles: 是否使用LLM生成详细人设
-            progress_callback: 进度回调函数 (stage, progress, message)
-            parallel_profile_count: 并行生成人设的数量，默认3
+            simulation_id: Simulation ID.
+            simulation_requirement: Requirement used for LLM-generated config.
+            document_text: Source text for LLM context.
+            defined_entity_types: Optional predefined entity types.
+            use_llm_for_profiles: Whether to use LLM-generated detailed personas.
+            progress_callback: Progress callback(stage, progress, message).
+            parallel_profile_count: Number of concurrent persona workers.
             
         Returns:
             SimulationState
         """
         state = self._load_simulation_state(simulation_id)
         if not state:
-            raise ValueError(f"模拟不存在: {simulation_id}")
+            raise ValueError(f"Simulation does not exist: {simulation_id}")
         
         try:
             state.status = SimulationStatus.PREPARING
             self._save_simulation_state(state)
             
             sim_dir = self._get_simulation_dir(simulation_id)
+            resume_enabled = Config.RESUME_FROM_CHECKPOINT
             
-            # ========== 阶段1: 读取并过滤实体 ==========
+            # Stage 1: read and filter entities.
             if progress_callback:
                 progress_callback("reading", 0, t('progress.connectingZepGraph'))
             
-            reader = ZepEntityReader()
-            
-            if progress_callback:
-                progress_callback("reading", 30, t('progress.readingNodeData'))
-            
-            filtered = reader.filter_defined_entities(
-                graph_id=state.graph_id,
-                defined_entity_types=defined_entity_types,
-                enrich_with_edges=True
-            )
+            filtered = None
+            if resume_enabled:
+                checkpoint = load_simulation_stage_checkpoint(
+                    simulation_id,
+                    "simulation_entities_loaded",
+                )
+                if checkpoint:
+                    filtered = self._filtered_entities_from_payload(checkpoint["payload"])
+                    if filtered:
+                        logger.info(
+                            "Resumed simulation entities from checkpoint: %s",
+                            simulation_id,
+                        )
+
+            if filtered is None:
+                reader = ZepEntityReader()
+                
+                if progress_callback:
+                    progress_callback("reading", 30, t('progress.readingNodeData'))
+                
+                filtered = run_pipeline_step(
+                    "zep_filter_entities_for_simulation",
+                    lambda: reader.filter_defined_entities(
+                        graph_id=state.graph_id,
+                        defined_entity_types=defined_entity_types,
+                        enrich_with_edges=True,
+                    ),
+                )
             
             state.entities_count = filtered.filtered_count
             state.entity_types = list(filtered.entity_types)
@@ -297,11 +402,27 @@ class SimulationManager:
             
             if filtered.filtered_count == 0:
                 state.status = SimulationStatus.FAILED
-                state.error = "没有找到符合条件的实体，请检查图谱是否正确构建"
+                state.error = "No qualifying entities found; verify the graph was built correctly."
                 self._save_simulation_state(state)
                 return state
+
+            try:
+                checkpoint_simulation_stage(
+                    simulation_id,
+                    state.project_id,
+                    "simulation_entities_loaded",
+                    {
+                        "simulation_id": simulation_id,
+                        "graph_id": state.graph_id,
+                        "entities_count": state.entities_count,
+                        "entity_types": state.entity_types,
+                        "filtered_entities": filtered.to_dict(),
+                    },
+                )
+            except Exception as cp_err:
+                logger.warning("checkpoint simulation_entities_loaded skipped: %s", cp_err)
             
-            # ========== 阶段2: 生成Agent Profile ==========
+            # Stage 2: generate Agent Profiles.
             total_entities = len(filtered.entities)
             
             if progress_callback:
@@ -312,7 +433,7 @@ class SimulationManager:
                     total=total_entities
                 )
             
-            # 传入graph_id以启用Zep检索功能，获取更丰富的上下文
+            # Pass graph_id to enable richer Zep search context.
             generator = OasisProfileGenerator(graph_id=state.graph_id)
             
             def profile_progress(current, total, msg):
@@ -326,7 +447,7 @@ class SimulationManager:
                         item_name=msg
                     )
             
-            # 设置实时保存的文件路径（优先使用 Reddit JSON 格式）
+            # Set the incremental output path, preferring Reddit JSON.
             realtime_output_path = None
             realtime_platform = "reddit"
             if state.enable_reddit:
@@ -336,20 +457,41 @@ class SimulationManager:
                 realtime_output_path = os.path.join(sim_dir, "twitter_profiles.csv")
                 realtime_platform = "twitter"
             
-            profiles = generator.generate_profiles_from_entities(
-                entities=filtered.entities,
-                use_llm=use_llm_for_profiles,
-                progress_callback=profile_progress,
-                graph_id=state.graph_id,  # 传入graph_id用于Zep检索
-                parallel_count=parallel_profile_count,  # 并行生成数量
-                realtime_output_path=realtime_output_path,  # 实时保存路径
-                output_platform=realtime_platform  # 输出格式
-            )
+            profiles = None
+            if resume_enabled:
+                checkpoint = load_simulation_stage_checkpoint(
+                    simulation_id,
+                    "simulation_profiles_written",
+                )
+                if checkpoint:
+                    raw_profiles = checkpoint["payload"].get("profiles")
+                    if isinstance(raw_profiles, list):
+                        profiles = [
+                            self._profile_from_dict(item)
+                            for item in raw_profiles
+                            if isinstance(item, dict)
+                        ]
+                        logger.info(
+                            "Resumed %d profiles from checkpoint: %s",
+                            len(profiles),
+                            simulation_id,
+                        )
+
+            if profiles is None:
+                profiles = generator.generate_profiles_from_entities(
+                    entities=filtered.entities,
+                    use_llm=use_llm_for_profiles,
+                    progress_callback=profile_progress,
+                    graph_id=state.graph_id,
+                    parallel_count=parallel_profile_count,
+                    realtime_output_path=realtime_output_path,
+                    output_platform=realtime_platform,
+                )
             
             state.profiles_count = len(profiles)
             
-            # 保存Profile文件（注意：Twitter使用CSV格式，Reddit使用JSON格式）
-            # Reddit 已经在生成过程中实时保存了，这里再保存一次确保完整性
+            # Save profile files. Twitter uses CSV; Reddit uses JSON.
+            # Reddit was also written incrementally, but save again for completeness.
             if progress_callback:
                 progress_callback(
                     "generating_profiles", 95,
@@ -366,7 +508,7 @@ class SimulationManager:
                 )
             
             if state.enable_twitter:
-                # Twitter使用CSV格式！这是OASIS的要求
+                # Twitter uses CSV as required by OASIS.
                 generator.save_profiles(
                     profiles=profiles,
                     file_path=os.path.join(sim_dir, "twitter_profiles.csv"),
@@ -380,8 +522,24 @@ class SimulationManager:
                     current=len(profiles),
                     total=len(profiles)
                 )
+
+            try:
+                checkpoint_simulation_stage(
+                    simulation_id,
+                    state.project_id,
+                    "simulation_profiles_written",
+                    {
+                        "simulation_id": simulation_id,
+                        "graph_id": state.graph_id,
+                        "profiles_count": state.profiles_count,
+                        "sim_dir": sim_dir,
+                        "profiles": [p.to_dict() for p in profiles],
+                    },
+                )
+            except Exception as cp_err:
+                logger.warning("checkpoint simulation_profiles_written skipped: %s", cp_err)
             
-            # ========== 阶段3: LLM智能生成模拟配置 ==========
+            # Stage 3: generate simulation configuration with the LLM.
             if progress_callback:
                 progress_callback(
                     "generating_config", 0,
@@ -400,16 +558,45 @@ class SimulationManager:
                     total=3
                 )
             
-            sim_params = config_generator.generate_config(
-                simulation_id=simulation_id,
-                project_id=state.project_id,
-                graph_id=state.graph_id,
-                simulation_requirement=simulation_requirement,
-                document_text=document_text,
-                entities=filtered.entities,
-                enable_twitter=state.enable_twitter,
-                enable_reddit=state.enable_reddit
-            )
+            sim_params = None
+            if resume_enabled:
+                checkpoint = load_simulation_stage_checkpoint(
+                    simulation_id,
+                    "simulation_config_generated",
+                )
+                if checkpoint:
+                    sim_params = self._simulation_params_from_payload(checkpoint["payload"])
+                    if sim_params:
+                        logger.info(
+                            "Resumed simulation config from checkpoint: %s",
+                            simulation_id,
+                        )
+
+            if sim_params is None:
+                sim_params = config_generator.generate_config(
+                    simulation_id=simulation_id,
+                    project_id=state.project_id,
+                    graph_id=state.graph_id,
+                    simulation_requirement=simulation_requirement,
+                    document_text=document_text,
+                    entities=filtered.entities,
+                    enable_twitter=state.enable_twitter,
+                    enable_reddit=state.enable_reddit,
+                )
+
+                try:
+                    checkpoint_simulation_stage(
+                        simulation_id,
+                        state.project_id,
+                        "simulation_config_generated",
+                        {
+                            "simulation_id": simulation_id,
+                            "graph_id": state.graph_id,
+                            "simulation_parameters": sim_params.to_dict(),
+                        },
+                    )
+                except Exception as cp_err:
+                    logger.warning("checkpoint simulation_config_generated skipped: %s", cp_err)
             
             if progress_callback:
                 progress_callback(
@@ -419,7 +606,7 @@ class SimulationManager:
                     total=3
                 )
             
-            # 保存配置文件
+            # Save configuration file.
             config_path = os.path.join(sim_dir, "simulation_config.json")
             with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(sim_params.to_json())
@@ -435,38 +622,73 @@ class SimulationManager:
                     total=3
                 )
             
-            # 注意：运行脚本保留在 backend/scripts/ 目录，不再复制到模拟目录
-            # 启动模拟时，simulation_runner 会从 scripts/ 目录运行脚本
+            # Runner scripts remain in backend/scripts and are launched from there.
             
-            # 更新状态
+            # Update state.
             state.status = SimulationStatus.READY
             self._save_simulation_state(state)
+
+            try:
+                checkpoint_simulation_stage(
+                    simulation_id,
+                    state.project_id,
+                    "simulation_prepared",
+                    {
+                        "simulation_id": simulation_id,
+                        "graph_id": state.graph_id,
+                        "entities_count": state.entities_count,
+                        "profiles_count": state.profiles_count,
+                        "config_path": config_path,
+                        "config_reasoning_preview": (
+                            state.config_reasoning[:2000]
+                            if state.config_reasoning
+                            else ""
+                        ),
+                    },
+                )
+            except Exception as cp_err:
+                logger.warning("checkpoint simulation_prepared skipped: %s", cp_err)
             
-            logger.info(f"模拟准备完成: {simulation_id}, "
-                       f"entities={state.entities_count}, profiles={state.profiles_count}")
+            logger.info(
+                "Simulation prepared: %s, entities=%d, profiles=%d",
+                simulation_id,
+                state.entities_count,
+                state.profiles_count,
+            )
             
             return state
             
         except Exception as e:
-            logger.error(f"模拟准备失败: {simulation_id}, error={str(e)}")
+            logger.error("Simulation preparation failed: %s, error=%s", simulation_id, str(e))
             import traceback
             logger.error(traceback.format_exc())
             state.status = SimulationStatus.FAILED
             state.error = str(e)
             self._save_simulation_state(state)
+            if getattr(state, "project_id", ""):
+                try:
+                    checkpoint_simulation_stage(
+                        simulation_id,
+                        state.project_id,
+                        "simulation_prepare_failed",
+                        {"simulation_id": simulation_id},
+                        error=str(e),
+                    )
+                except Exception as cp_err:
+                    logger.warning("checkpoint simulation_prepare_failed skipped: %s", cp_err)
             raise
     
     def get_simulation(self, simulation_id: str) -> Optional[SimulationState]:
-        """获取模拟状态"""
+        """Return simulation state."""
         return self._load_simulation_state(simulation_id)
     
     def list_simulations(self, project_id: Optional[str] = None) -> List[SimulationState]:
-        """列出所有模拟"""
+        """List simulations."""
         simulations = []
         
         if os.path.exists(self.SIMULATION_DATA_DIR):
             for sim_id in os.listdir(self.SIMULATION_DATA_DIR):
-                # 跳过隐藏文件（如 .DS_Store）和非目录文件
+                # Skip hidden files such as .DS_Store and non-directories.
                 sim_path = os.path.join(self.SIMULATION_DATA_DIR, sim_id)
                 if sim_id.startswith('.') or not os.path.isdir(sim_path):
                     continue
@@ -479,10 +701,10 @@ class SimulationManager:
         return simulations
     
     def get_profiles(self, simulation_id: str, platform: str = "reddit") -> List[Dict[str, Any]]:
-        """获取模拟的Agent Profile"""
+        """Return Agent Profiles for a simulation."""
         state = self._load_simulation_state(simulation_id)
         if not state:
-            raise ValueError(f"模拟不存在: {simulation_id}")
+            raise ValueError(f"Simulation does not exist: {simulation_id}")
         
         sim_dir = self._get_simulation_dir(simulation_id)
         profile_path = os.path.join(sim_dir, f"{platform}_profiles.json")
@@ -494,7 +716,7 @@ class SimulationManager:
             return json.load(f)
     
     def get_simulation_config(self, simulation_id: str) -> Optional[Dict[str, Any]]:
-        """获取模拟配置"""
+        """Return simulation configuration."""
         sim_dir = self._get_simulation_dir(simulation_id)
         config_path = os.path.join(sim_dir, "simulation_config.json")
         
@@ -505,7 +727,7 @@ class SimulationManager:
             return json.load(f)
     
     def get_run_instructions(self, simulation_id: str) -> Dict[str, str]:
-        """获取运行说明"""
+        """Return run instructions."""
         sim_dir = self._get_simulation_dir(simulation_id)
         config_path = os.path.join(sim_dir, "simulation_config.json")
         scripts_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../scripts'))
@@ -520,10 +742,10 @@ class SimulationManager:
                 "parallel": f"python {scripts_dir}/run_parallel_simulation.py --config {config_path}",
             },
             "instructions": (
-                f"1. 激活conda环境: conda activate MiroFish\n"
-                f"2. 运行模拟 (脚本位于 {scripts_dir}):\n"
-                f"   - 单独运行Twitter: python {scripts_dir}/run_twitter_simulation.py --config {config_path}\n"
-                f"   - 单独运行Reddit: python {scripts_dir}/run_reddit_simulation.py --config {config_path}\n"
-                f"   - 并行运行双平台: python {scripts_dir}/run_parallel_simulation.py --config {config_path}"
+                f"1. Activate your env: conda activate MiroFish (or equivalent)\n"
+                f"2. Run simulators from {scripts_dir}:\n"
+                f"   - Twitter only: python {scripts_dir}/run_twitter_simulation.py --config {config_path}\n"
+                f"   - Reddit only: python {scripts_dir}/run_reddit_simulation.py --config {config_path}\n"
+                f"   - Both in parallel: python {scripts_dir}/run_parallel_simulation.py --config {config_path}"
             )
         }

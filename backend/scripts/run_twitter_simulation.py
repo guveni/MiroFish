@@ -435,16 +435,14 @@ class TwitterSimulationRunner:
         - LLM_MODEL_NAME: 模型名称
         """
         if is_vertex_ai_enabled():
-            llm_model, url_display, auth_hint = prepare_camel_openai_env(
-                self.config.get("llm_model", "gpt-4o-mini")
-            )
+            llm_model, url_display, auth_hint = prepare_camel_openai_env()
             print(f"LLM配置(Vertex): model={llm_model}, base_url={url_display}, auth={auth_hint}")
         else:
             llm_api_key = os.environ.get("LLM_API_KEY", "")
             llm_base_url = os.environ.get("LLM_BASE_URL", "")
-            llm_model = os.environ.get("LLM_MODEL_NAME", "")
+            llm_model = os.environ.get("LLM_MODEL_NAME", "").strip()
             if not llm_model:
-                llm_model = self.config.get("llm_model", "gpt-4o-mini")
+                raise ValueError("请在项目根目录 .env 设置 LLM_MODEL_NAME")
             if llm_api_key:
                 os.environ["OPENAI_API_KEY"] = llm_api_key
             if not os.environ.get("OPENAI_API_KEY"):

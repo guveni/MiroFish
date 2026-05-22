@@ -9,6 +9,7 @@ import re
 from typing import Dict, Any, List, Optional
 from ..utils.llm_client import LLMClient
 from ..utils.locale import get_language_instruction
+from ..utils.pipeline_retry import run_pipeline_step
 
 logger = logging.getLogger(__name__)
 
@@ -186,24 +187,27 @@ class OntologyGenerator:
         self,
         document_texts: List[str],
         simulation_requirement: str,
-        additional_context: Optional[str] = None
+        additional_context: Optional[str] = None,
+        web_search_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         生成本体定义
         
         Args:
-            document_texts: 文档文本列表
+            document_texts: 文档文本列表（可为空，可与联网检索摘要二选一或同时使用）
             simulation_requirement: 模拟需求描述
             additional_context: 额外上下文
+            web_search_text: Gemini（Google Search grounding）合并后的检索正文（可选）
             
         Returns:
             本体定义（entity_types, edge_types等）
         """
         # 构建用户消息
         user_message = self._build_user_message(
-            document_texts, 
+            document_texts,
             simulation_requirement,
-            additional_context
+            additional_context,
+            web_search_text,
         )
         
         lang_instruction = get_language_instruction()
@@ -213,11 +217,14 @@ class OntologyGenerator:
             {"role": "user", "content": user_message}
         ]
         
-        # 调用LLM
-        result = self.llm_client.chat_json(
-            messages=messages,
-            temperature=0.3,
-            max_tokens=4096
+        # 调用LLM（步骤级指数退避重试）
+        result = run_pipeline_step(
+            "ontology_llm_json",
+            lambda: self.llm_client.chat_json(
+                messages=messages,
+                temperature=0.3,
+                max_tokens=4096,
+            ),
         )
         
         # 验证和后处理
@@ -232,28 +239,34 @@ class OntologyGenerator:
         self,
         document_texts: List[str],
         simulation_requirement: str,
-        additional_context: Optional[str]
+        additional_context: Optional[str],
+        web_search_text: Optional[str] = None,
     ) -> str:
         """构建用户消息"""
-        
-        # 合并文本
-        combined_text = "\n\n---\n\n".join(document_texts)
-        original_length = len(combined_text)
-        
-        # 如果文本超过5万字，截断（仅影响传给LLM的内容，不影响图谱构建）
-        if len(combined_text) > self.MAX_TEXT_LENGTH_FOR_LLM:
-            combined_text = combined_text[:self.MAX_TEXT_LENGTH_FOR_LLM]
-            combined_text += f"\n\n...(原文共{original_length}字，已截取前{self.MAX_TEXT_LENGTH_FOR_LLM}字用于本体分析)..."
-        
+        doc_block = "\n\n---\n\n".join(document_texts).strip()
+        vs_block = (web_search_text or "").strip()
+
+        body_parts: List[str] = []
+        if doc_block:
+            body_parts.append(f"## 文档内容\n\n{doc_block}")
+        if vs_block:
+            body_parts.append(f"## 联网检索摘要 (Gemini / Google Search)\n\n{vs_block}")
+
+        body = "\n\n".join(body_parts)
+        original_length = len(body)
+        if len(body) > self.MAX_TEXT_LENGTH_FOR_LLM:
+            body = body[: self.MAX_TEXT_LENGTH_FOR_LLM]
+            body += (
+                f"\n\n...(材料共约{original_length}字，已截取前{self.MAX_TEXT_LENGTH_FOR_LLM}字用于本体分析)..."
+            )
+
         message = f"""## 模拟需求
 
 {simulation_requirement}
 
-## 文档内容
-
-{combined_text}
+{body}
 """
-        
+
         if additional_context:
             message += f"""
 ## 额外说明
@@ -262,12 +275,12 @@ class OntologyGenerator:
 """
         
         message += """
-请根据以上内容，设计适合社会舆论模拟的实体类型和关系类型。
+请根据以下材料，设计适合社会舆论模拟的实体类型和关系类型。
 
 **必须遵守的规则**：
 1. 必须正好输出10个实体类型
 2. 最后2个必须是兜底类型：Person（个人兜底）和 Organization（组织兜底）
-3. 前8个是根据文本内容设计的具体类型
+3. 前8个是根据材料中出现的角色与组织等设计的具体类型
 4. 所有实体类型必须是现实中可以发声的主体，不能是抽象概念
 5. 属性名不能使用 name、uuid、group_id 等保留字，用 full_name、org_name 等替代
 """

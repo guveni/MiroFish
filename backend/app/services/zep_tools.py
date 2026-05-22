@@ -18,7 +18,7 @@ from zep_cloud.client import Zep
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
-from ..utils.locale import get_locale, t
+from ..utils.locale import t
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
 
 logger = get_logger('mirofish.zep_tools')
@@ -1639,27 +1639,25 @@ class ZepToolsService:
     ) -> List[str]:
         """使用LLM生成采访问题"""
         
-        agent_roles = [a.get("profession", "未知") for a in selected_agents]
-        
-        system_prompt = """你是一个专业的记者/采访者。根据采访需求，生成3-5个深度采访问题。
+        agent_roles = [a.get("profession", "unknown") for a in selected_agents]
 
-问题要求：
-1. 开放性问题，鼓励详细回答
-2. 针对不同角色可能有不同答案
-3. 涵盖事实、观点、感受等多个维度
-4. 语言自然，像真实采访一样
-5. 每个问题控制在50字以内，简洁明了
-6. 直接提问，不要包含背景说明或前缀
+        system_prompt = """You are an experienced interviewer. Produce 3–5 in-depth interview questions from the briefing.
 
-返回JSON格式：{"questions": ["问题1", "问题2", ...]}"""
+Criteria:
+1. Prefer open-ended questions that invite elaboration.
+2. Let different respondent roles yield different angles.
+3. Cover facts, opinions, and subjective experience.
+4. Sound natural — like spoken journalism.
+5. Keep each question brief (within ~400 characters total for all languages; English ≈ ≤50 words per question).
+6. Ask directly — no preamble or scene-setting paragraphs.
 
-        user_prompt = f"""采访需求：{interview_requirement}
+Respond with JSON only: {"questions": ["...", "..."]}."""
 
-模拟背景：{simulation_requirement if simulation_requirement else "未提供"}
+        user_prompt = f"""Briefing:\n{interview_requirement}
 
-采访对象角色：{', '.join(agent_roles)}
+Simulation backdrop:\n{simulation_requirement if simulation_requirement else "Not provided"}
 
-请生成3-5个采访问题。"""
+Respondent roles:\n{', '.join(agent_roles)}"""
 
         try:
             response = self.llm.chat_json(
@@ -1670,14 +1668,21 @@ class ZepToolsService:
                 temperature=0.5
             )
             
-            return response.get("questions", [f"关于{interview_requirement}，您有什么看法？"])
+            return response.get(
+                "questions",
+                [
+                    f"What is your take on «{interview_requirement}»?",
+                    "How does this situation affect stakeholders you care about?",
+                    "What concrete changes would improve outcomes?"
+                ],
+            )
             
         except Exception as e:
             logger.warning(t("console.generateInterviewQuestionsFailed", error=e))
             return [
-                f"关于{interview_requirement}，您的观点是什么？",
-                "这件事对您或您所代表的群体有什么影响？",
-                "您认为应该如何解决或改进这个问题？"
+                f"Regarding «{interview_requirement}», what is your view?",
+                "How does this affect you or the group you represent?",
+                "What would you propose to solve or improve the situation?"
             ]
     
     def _generate_interview_summary(
@@ -1688,36 +1693,35 @@ class ZepToolsService:
         """生成采访摘要"""
         
         if not interviews:
-            return "未完成任何采访"
-        
-        # 收集所有采访内容
+            return "No interviews were completed."
+
         interview_texts = []
         for interview in interviews:
-            interview_texts.append(f"【{interview.agent_name}（{interview.agent_role}）】\n{interview.response[:500]}")
-        
-        quote_instruction = "引用受访者原话时使用中文引号「」" if get_locale() == 'zh' else 'Use quotation marks "" when quoting interviewees'
-        system_prompt = f"""你是一个专业的新闻编辑。请根据多位受访者的回答，生成一份采访摘要。
+            interview_texts.append(f"[{interview.agent_name} ({interview.agent_role})]\n{interview.response[:500]}")
 
-摘要要求：
-1. 提炼各方主要观点
-2. 指出观点的共识和分歧
-3. 突出有价值的引言
-4. 客观中立，不偏袒任何一方
-5. 控制在1000字内
+        quote_instruction = 'When quoting respondents verbatim, use standard English double quotes "".'
+        system_prompt = f"""You are a professional news editor. From multiple respondent answers, produce an interview recap.
 
-格式约束（必须遵守）：
-- 使用纯文本段落，用空行分隔不同部分
-- 不要使用Markdown标题（如#、##、###）
-- 不要使用分割线（如---、***）
+Requirements:
+1. Capture each side's main positions
+2. Note areas of consensus and disagreement
+3. Highlight strong quotes worth keeping
+4. Stay neutral — do not take sides
+5. Aim for concise output (roughly up to ~1000 characters total).
+
+Formatting rules (follow strictly):
+- Plain text paragraphs separated by blank lines
+- Do not use Markdown headings (# / ## / ###)
+- Do not use horizontal rules like --- or ***
 - {quote_instruction}
-- 可以使用**加粗**标记关键词，但不要使用其他Markdown语法"""
+- You may use **bold** sparingly for key terms — no other Markdown."""
 
-        user_prompt = f"""采访主题：{interview_requirement}
+        user_prompt = f"""Topic: {interview_requirement}
 
-采访内容：
+Transcripts:
 {"".join(interview_texts)}
 
-请生成采访摘要。"""
+Write the summary."""
 
         try:
             summary = self.llm.chat(
@@ -1732,5 +1736,7 @@ class ZepToolsService:
             
         except Exception as e:
             logger.warning(t("console.generateInterviewSummaryFailed", error=e))
-            # 降级：简单拼接
-            return f"共采访了{len(interviews)}位受访者，包括：" + "、".join([i.agent_name for i in interviews])
+            return (
+                f"Interviewed {len(interviews)} respondents: "
+                + ", ".join(i.agent_name for i in interviews)
+            )

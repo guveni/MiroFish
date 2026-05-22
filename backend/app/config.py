@@ -1,59 +1,115 @@
 """
-配置管理
-统一从项目根目录的 .env 文件加载配置
+Configuration management.
+Loads settings from the project root .env file.
 """
 
 import os
 from dotenv import load_dotenv
 
-# 加载项目根目录的 .env 文件
-# 路径: MiroFish/.env (相对于 backend/app/config.py)
+# Load the project root .env file.
+# Path: MiroFish/.env (relative to backend/app/config.py)
 project_root_env = os.path.join(os.path.dirname(__file__), '../../.env')
 
 if os.path.exists(project_root_env):
     load_dotenv(project_root_env, override=True)
 else:
-    # 如果根目录没有 .env，尝试加载环境变量（用于生产环境）
+    # Fall back to process environment in production deployments.
     load_dotenv(override=True)
 
 
+def _normalize_vertex_genai_model(model: str | None) -> str:
+    """Normalize OpenAI-compatible Vertex model ids for google-genai."""
+    m = (model or '').strip()
+    if m.startswith('google/'):
+        return m.split('/', 1)[1].strip()
+    return m
+
+
+def _implicit_gemini_web_search_model(llm_model: str, vertex_enabled: bool) -> str:
+    """
+    Reuse LLM_MODEL_NAME only when it is clearly a Vertex Gemini model.
+
+    This avoids sending provider-specific chat models such as qwen-plus to the
+    Vertex GenAI grounding endpoint when GEMINI_WEB_SEARCH_MODEL is omitted.
+    """
+    normalized = _normalize_vertex_genai_model(llm_model)
+    if not normalized:
+        return ''
+    if (llm_model or '').strip().startswith('google/'):
+        return normalized
+    if vertex_enabled and normalized.lower().startswith('gemini-'):
+        return normalized
+    return ''
+
+
+def _llm_provider() -> str:
+    provider = (os.environ.get('LLM_PROVIDER') or '').strip().lower()
+    if provider:
+        return provider
+    if os.environ.get('LLM_USE_VERTEX_AI', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        return 'vertex'
+    return 'openai'
+
+
 class Config:
-    """Flask配置类"""
+    """Flask configuration."""
     
-    # Flask配置
+    # Flask settings
     SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
     DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
     
-    # JSON配置 - 禁用ASCII转义，让中文直接显示（而不是 \uXXXX 格式）
+    # JSON settings. Keep Unicode readable instead of escaping it as \uXXXX.
     JSON_AS_ASCII = False
     
-    # LLM配置（统一使用OpenAI格式）
+    # LLM settings. LLM_PROVIDER choices: openai, azure, vertex.
+    LLM_PROVIDER = _llm_provider()
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
-    LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    LLM_MODEL_NAME = (os.environ.get('LLM_MODEL_NAME') or '').strip()
     LLM_USE_VERTEX_AI = (
-        os.environ.get('LLM_USE_VERTEX_AI', '').strip().lower() in ('1', 'true', 'yes', 'on')
+        LLM_PROVIDER == 'vertex'
+        or os.environ.get('LLM_USE_VERTEX_AI', '').strip().lower() in ('1', 'true', 'yes', 'on')
     )
+    AZURE_OPENAI_ENDPOINT = (os.environ.get('AZURE_OPENAI_ENDPOINT') or '').strip()
+    AZURE_OPENAI_API_KEY = os.environ.get('AZURE_OPENAI_API_KEY')
+    AZURE_OPENAI_API_VERSION = (
+        os.environ.get('AZURE_OPENAI_API_VERSION') or '2024-02-15-preview'
+    ).strip()
+    AZURE_OPENAI_DEPLOYMENT = (
+        os.environ.get('AZURE_OPENAI_DEPLOYMENT') or LLM_MODEL_NAME
+    ).strip()
     VERTEX_AI_PROJECT_ID = os.environ.get('VERTEX_AI_PROJECT_ID', '')
-    VERTEX_AI_LOCATION = os.environ.get('VERTEX_AI_LOCATION', 'us-central1')
+    VERTEX_AI_LOCATION = (os.environ.get('VERTEX_AI_LOCATION') or '').strip()
+
+    # Gemini (Vertex) web search grounding via Google Search, not Discovery Engine.
+    # Requires VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT plus VERTEX_AI_LOCATION; uses ADC.
+    # When GEMINI_WEB_SEARCH_MODEL is unset, reuse LLM_MODEL_NAME only for Vertex Gemini models.
+    # OpenAI-compatible names like google/foo are normalized for Vertex GenAI.
+    GEMINI_WEB_SEARCH_MODEL = (
+        _normalize_vertex_genai_model(os.environ.get('GEMINI_WEB_SEARCH_MODEL'))
+        or _implicit_gemini_web_search_model(LLM_MODEL_NAME, LLM_USE_VERTEX_AI)
+    )
+    GEMINI_WEB_SEARCH_MAX_QUERIES = int(os.environ.get('GEMINI_WEB_SEARCH_MAX_QUERIES', '5'))
+    GEMINI_WEB_SEARCH_MAX_CHARS = int(os.environ.get('GEMINI_WEB_SEARCH_MAX_CHARS', '25000'))
+    GEMINI_WEB_SEARCH_MAX_OUTPUT_TOKENS = int(os.environ.get('GEMINI_WEB_SEARCH_MAX_OUTPUT_TOKENS', '8192'))
     
-    # Zep配置
+    # Zep settings
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
     
-    # 文件上传配置
+    # File upload settings
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB
     UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), '../uploads')
     ALLOWED_EXTENSIONS = {'pdf', 'md', 'txt', 'markdown'}
     
-    # 文本处理配置
-    DEFAULT_CHUNK_SIZE = 500  # 默认切块大小
-    DEFAULT_CHUNK_OVERLAP = 50  # 默认重叠大小
+    # Text processing settings
+    DEFAULT_CHUNK_SIZE = 500
+    DEFAULT_CHUNK_OVERLAP = 50
     
-    # OASIS模拟配置
+    # OASIS simulation settings
     OASIS_DEFAULT_MAX_ROUNDS = int(os.environ.get('OASIS_DEFAULT_MAX_ROUNDS', '10'))
     OASIS_SIMULATION_DATA_DIR = os.path.join(os.path.dirname(__file__), '../uploads/simulations')
     
-    # OASIS平台可用动作配置
+    # OASIS platform actions
     OASIS_TWITTER_ACTIONS = [
         'CREATE_POST', 'LIKE_POST', 'REPOST', 'FOLLOW', 'DO_NOTHING', 'QUOTE_POST'
     ]
@@ -63,26 +119,61 @@ class Config:
         'TREND', 'REFRESH', 'DO_NOTHING', 'FOLLOW', 'MUTE'
     ]
     
-    # Report Agent配置
+    # Report Agent settings
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
-    
+
+    # Pipeline step retries: one initial attempt plus PIPELINE_STEP_MAX_RETRIES retries.
+    PIPELINE_STEP_MAX_RETRIES = int(os.environ.get('PIPELINE_STEP_MAX_RETRIES', '2'))
+    PIPELINE_STEP_INITIAL_DELAY_SEC = float(
+        os.environ.get('PIPELINE_STEP_INITIAL_DELAY_SEC', '1.0')
+    )
+    PIPELINE_STEP_MAX_DELAY_SEC = float(
+        os.environ.get('PIPELINE_STEP_MAX_DELAY_SEC', '30.0')
+    )
+    PIPELINE_STEP_BACKOFF_FACTOR = float(
+        os.environ.get('PIPELINE_STEP_BACKOFF_FACTOR', '2.0')
+    )
+    PIPELINE_STEP_JITTER = os.environ.get('PIPELINE_STEP_JITTER', 'true').strip().lower() in (
+        '1', 'true', 'yes', 'on',
+    )
+    RESUME_FROM_CHECKPOINT = os.environ.get(
+        'RESUME_FROM_CHECKPOINT', 'true'
+    ).strip().lower() in ('1', 'true', 'yes', 'on')
+
+    @classmethod
+    def require_llm_model_name(cls) -> str:
+        if not cls.LLM_MODEL_NAME:
+            raise ValueError("LLM_MODEL_NAME must be explicitly configured in .env")
+        return cls.LLM_MODEL_NAME
+
     @classmethod
     def validate(cls):
-        """验证必要配置"""
+        """Validate required configuration."""
         errors = []
-        if cls.LLM_USE_VERTEX_AI:
+        if cls.LLM_PROVIDER not in ('openai', 'azure', 'vertex'):
+            errors.append("LLM_PROVIDER must be one of: openai, azure, vertex")
+        if cls.LLM_PROVIDER == 'azure':
+            if not cls.AZURE_OPENAI_ENDPOINT:
+                errors.append("AZURE_OPENAI_ENDPOINT is not configured")
+            if not cls.AZURE_OPENAI_API_KEY:
+                errors.append("AZURE_OPENAI_API_KEY is not configured")
+            if not cls.AZURE_OPENAI_DEPLOYMENT:
+                errors.append("AZURE_OPENAI_DEPLOYMENT is not configured")
+        elif cls.LLM_USE_VERTEX_AI:
             from .utils.vertex_openai import vertex_config_present
 
             if not vertex_config_present():
                 errors.append(
-                    "Vertex AI 启用时请在 .env 中设置 VERTEX_AI_PROJECT_ID（或 GOOGLE_CLOUD_PROJECT）"
-                    " 与 VERTEX_AI_LOCATION，或直接设置完整的 LLM_BASE_URL（openapi 端点）"
+                    "Vertex AI requires VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT "
+                    "plus VERTEX_AI_LOCATION, or a complete Vertex OpenAPI LLM_BASE_URL "
+                    "with LLM_VERTEX_USE_EXPLICIT_BASE_URL=true when needed."
                 )
         elif not cls.LLM_API_KEY:
-            errors.append("LLM_API_KEY 未配置")
+            errors.append("LLM_API_KEY is not configured")
         if not cls.ZEP_API_KEY:
-            errors.append("ZEP_API_KEY 未配置")
+            errors.append("ZEP_API_KEY is not configured")
+        if not cls.LLM_MODEL_NAME and cls.LLM_PROVIDER != 'azure':
+            errors.append("LLM_MODEL_NAME is not configured")
         return errors
-

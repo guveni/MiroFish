@@ -19,51 +19,62 @@ for filename in os.listdir(_locales_dir):
         with open(os.path.join(_locales_dir, filename), 'r', encoding='utf-8') as f:
             _translations[locale_name] = json.load(f)
 
+_DEFAULT_LOCALE = 'en'
+
 
 def set_locale(locale: str):
-    """Set locale for current thread. Call at the start of background threads."""
+    """Set locale for current thread (e.g. background workers)."""
     _thread_local.locale = locale
 
 
 def get_locale() -> str:
     if has_request_context():
-        raw = request.headers.get('Accept-Language', 'zh')
-        return raw if raw in _translations else 'zh'
-    return getattr(_thread_local, 'locale', 'zh')
+        raw = (request.headers.get('Accept-Language') or '').strip().split(',')[0].strip()
+        if not raw:
+            raw = _DEFAULT_LOCALE
+        base = raw.split('-')[0] if raw else _DEFAULT_LOCALE
+        # Match en, en-US, etc. against loaded bundles
+        if raw in _translations:
+            return raw
+        if base in _translations:
+            return base
+        return _DEFAULT_LOCALE if _DEFAULT_LOCALE in _translations else next(iter(_translations), _DEFAULT_LOCALE)
+    return getattr(_thread_local, 'locale', _DEFAULT_LOCALE)
 
 
 def t(key: str, **kwargs) -> str:
     locale = get_locale()
-    messages = _translations.get(locale, _translations.get('zh', {}))
+    fallback_chain = []
+    if locale != _DEFAULT_LOCALE:
+        fallback_chain.append(_DEFAULT_LOCALE)
+    fallback_chain.extend([k for k in _translations if k not in fallback_chain])
 
-    value = messages
-    for part in key.split('.'):
-        if isinstance(value, dict):
-            value = value.get(part)
-        else:
-            value = None
-            break
-
-    if value is None:
-        value = _translations.get('zh', {})
+    def _resolve(loc: str) -> str | None:
+        messages = _translations.get(loc)
+        if not messages:
+            return None
+        value: object = messages
         for part in key.split('.'):
             if isinstance(value, dict):
                 value = value.get(part)
             else:
-                value = None
-                break
+                return None
+        if isinstance(value, str):
+            out = value
+            if kwargs:
+                for k, v in kwargs.items():
+                    out = out.replace(f'{{{k}}}', str(v))
+            return out
+        return None
 
-    if value is None:
-        return key
-
-    if kwargs:
-        for k, v in kwargs.items():
-            value = value.replace(f'{{{k}}}', str(v))
-
-    return value
+    for loc in [locale] + fallback_chain:
+        got = _resolve(loc)
+        if got is not None:
+            return got
+    return key
 
 
 def get_language_instruction() -> str:
     locale = get_locale()
-    lang_config = _languages.get(locale, _languages.get('zh', {}))
-    return lang_config.get('llmInstruction', '请使用中文回答。')
+    lang_config = _languages.get(locale, _languages.get(_DEFAULT_LOCALE, {}))
+    return lang_config.get('llmInstruction', 'Please respond in English.')
