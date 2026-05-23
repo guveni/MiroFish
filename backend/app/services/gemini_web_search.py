@@ -115,6 +115,7 @@ def search_queries_to_corpus(
     simulation_requirement: str = "",
     *,
     max_chars: Optional[int] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """
     对每个检索子问题调用 Gemini + Google Search grounding，合并为图谱/本体用语料。
@@ -141,18 +142,20 @@ def search_queries_to_corpus(
         max_output_tokens=Config.GEMINI_WEB_SEARCH_MAX_OUTPUT_TOKENS,
     )
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import threading
+
+    # We will run all queries concurrently
     blocks: List[str] = []
     rows: List[Dict[str, Any]] = []
     total_chars = 0
     all_uris = set()
+    lock = threading.Lock()
 
     sim_ctx = (simulation_requirement or "").strip()
     sim_hint = f"\nOverall simulation need (context only):\n{sim_ctx[:1200]}\n" if sim_ctx else ""
 
-    for q in queries:
-        if total_chars >= budget:
-            break
-
+    def _process_query(q: str):
         user_text = (
             "You are gathering factual context from the web for a social-media simulation knowledge graph.\n"
             "Respond with concise bullet points: key actors (people, organizations), roles, stated relationships, "
@@ -160,7 +163,7 @@ def search_queries_to_corpus(
             f"{sim_hint}\n"
             f"Research focus:\n{q}\n"
         )
-
+        
         try:
             resp = run_pipeline_step(
                 "gemini_grounding_generate",
@@ -170,58 +173,78 @@ def search_queries_to_corpus(
                     config=gen_cfg,
                 ),
             )
+            return q, resp, None
         except Exception as e:
-            logger.warning(
-                "Gemini web grounding failed for query %r after retries: %s", q, e
-            )
-            rows.append({"query": q, "model": model, "error": str(e), "result_block_count": 0})
-            continue
+            return q, None, e
 
-        body = _response_to_text(resp)
-        src_objs: List[Dict[str, str]] = []
-        src_lines: List[str] = []
-        usage_dict: Optional[Dict[str, Any]] = None
-        if resp.candidates:
-            c0 = resp.candidates[0]
-            src_objs = _grounding_chunks_struct(c0)
-            src_lines = _grounding_sources_lines(c0)
-        usage_dict = _serialize_usage(resp.usage_metadata)
-
-        for s in src_objs:
-            uri = (s.get("uri") or "").strip()
-            if uri:
-                all_uris.add(uri)
-
-        chunk_parts: List[str] = []
-        if body:
-            chunk_parts.append(body)
-        if src_lines:
-            chunk_parts.append("Sources:\n" + "\n".join(src_lines))
-
-        chunk = "\n\n".join(chunk_parts).strip()
-        meta_row: Dict[str, Any] = {
-            "query": q,
-            "model": model,
-            "sources": src_objs,
-            "usage": usage_dict,
-            "result_block_count": 1 if body else 0,
-        }
-        rows.append(meta_row)
-
-        if not chunk:
-            continue
-
-        if len(chunk) > 12000:
-            chunk = chunk[:12000] + "\n...(trimmed)"
-
-        remain = budget - total_chars
-        if remain <= 0:
-            break
-        if len(chunk) > remain:
-            chunk = chunk[:remain]
-
-        blocks.append(f"### Query: {q}\n{chunk}")
-        total_chars += len(chunk) + 1
+    # Submit all tasks
+    completed_queries = 0
+    with ThreadPoolExecutor(max_workers=min(len(queries), 10)) as executor:
+        future_to_q = {executor.submit(_process_query, q): q for q in queries}
+        
+        for future in as_completed(future_to_q):
+            q, resp, err = future.result()
+            
+            with lock:
+                completed_queries += 1
+                if progress_callback:
+                    progress_callback(completed_queries, len(queries))
+                
+                if total_chars >= budget:
+                    continue  # already hit budget, just discard remaining
+                    
+                if err:
+                    logger.warning(
+                        "Gemini web grounding failed for query %r after retries: %s", q, err
+                    )
+                    rows.append({"query": q, "model": model, "error": str(err), "result_block_count": 0})
+                    continue
+                    
+                body = _response_to_text(resp)
+                src_objs: List[Dict[str, str]] = []
+                src_lines: List[str] = []
+                usage_dict: Optional[Dict[str, Any]] = None
+                if resp.candidates:
+                    c0 = resp.candidates[0]
+                    src_objs = _grounding_chunks_struct(c0)
+                    src_lines = _grounding_sources_lines(c0)
+                usage_dict = _serialize_usage(resp.usage_metadata)
+        
+                for s in src_objs:
+                    uri = (s.get("uri") or "").strip()
+                    if uri:
+                        all_uris.add(uri)
+        
+                chunk_parts: List[str] = []
+                if body:
+                    chunk_parts.append(body)
+                if src_lines:
+                    chunk_parts.append("Sources:\n" + "\n".join(src_lines))
+        
+                chunk = "\n\n".join(chunk_parts).strip()
+                meta_row: Dict[str, Any] = {
+                    "query": q,
+                    "model": model,
+                    "sources": src_objs,
+                    "usage": usage_dict,
+                    "result_block_count": 1 if body else 0,
+                }
+                rows.append(meta_row)
+        
+                if not chunk:
+                    continue
+        
+                if len(chunk) > 12000:
+                    chunk = chunk[:12000] + "\n...(trimmed)"
+        
+                remain = budget - total_chars
+                if remain <= 0:
+                    continue
+                if len(chunk) > remain:
+                    chunk = chunk[:remain]
+        
+                blocks.append(f"### Query: {q}\n{chunk}")
+                total_chars += len(chunk) + 1
 
     text = "\n\n---\n\n".join(blocks)
     if len(text) > budget:

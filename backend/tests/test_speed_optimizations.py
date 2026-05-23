@@ -1,13 +1,5 @@
-from app.services.graphiti_graph_builder import _in_batch_progress_ratio
 from app.services.oasis_profile_generator import OasisProfileGenerator
 from app.services.zep_entity_reader import EntityNode, ZepEntityReader
-
-
-def test_in_batch_progress_ratio_interpolates_and_caps():
-    assert _in_batch_progress_ratio(0.0, 0.1, 0.0, 90) == 0.0
-    assert _in_batch_progress_ratio(0.0, 0.1, 45.0, 90) == 0.05
-    assert _in_batch_progress_ratio(0.0, 0.1, 90.0, 90) == 0.095
-    assert _in_batch_progress_ratio(0.2, 0.2, 10.0, 90) == 0.2
 
 
 def test_filter_defined_entities_indexes_edges_without_changing_enrichment(monkeypatch):

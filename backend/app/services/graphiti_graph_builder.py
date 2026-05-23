@@ -1,7 +1,7 @@
 """Graphiti-backed graph build service."""
 
+import asyncio
 import threading
-import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
@@ -11,21 +11,6 @@ from ..utils import graphiti_client
 from ..utils.graph_paging import fetch_all_edges, fetch_all_nodes
 from ..utils.locale import t
 from ..utils.pipeline_retry import run_pipeline_step_async
-
-
-def _in_batch_progress_ratio(
-    batch_start: float,
-    batch_end: float,
-    elapsed_s: float,
-    expected_s: float,
-) -> float:
-    """Interpolate chunk progress while a long-running Graphiti bulk call is in flight."""
-    if batch_end <= batch_start:
-        return batch_end
-    if expected_s <= 0:
-        return batch_end
-    fraction = min(0.95, elapsed_s / expected_s)
-    return batch_start + (batch_end - batch_start) * fraction
 
 
 class GraphitiGraphBuilderService(GraphBuilderService):
@@ -74,34 +59,23 @@ class GraphitiGraphBuilderService(GraphBuilderService):
         if batch_size is None:
             batch_size = Config.GRAPHITI_BATCH_SIZE
         batch_size = max(1, batch_size)
-        expected_batch_seconds = max(30, Config.GRAPHITI_BATCH_HEARTBEAT_SECONDS)
-        heartbeat_interval = 3
 
         async def _add_all_episodes() -> List[str]:
             from graphiti_core.nodes import EpisodeType
             from graphiti_core.utils.bulk_utils import RawEpisode
 
-            episode_uuids: List[str] = []
             reference_time = graphiti_client.utcnow()
             total_batches = (total_chunks + batch_size - 1) // batch_size
+            
+            semaphore = asyncio.Semaphore(Config.GRAPHITI_SEMAPHORE_LIMIT)
+            completed_batches = 0
+            progress_lock = threading.Lock()
 
-            for batch_index in range(0, total_chunks, batch_size):
+            async def _process_batch(batch_index: int, batch_num: int) -> List[str]:
+                nonlocal completed_batches
+                
                 batch_chunks = chunks[batch_index : batch_index + batch_size]
-                batch_num = batch_index // batch_size + 1
-                batch_start_ratio = batch_index / total_chunks
-                batch_end_ratio = min(1.0, (batch_index + len(batch_chunks)) / total_chunks)
-
-                if progress_callback:
-                    progress_callback(
-                        t(
-                            "progress.sendingBatch",
-                            current=batch_num,
-                            total=total_batches,
-                            chunks=len(batch_chunks),
-                        ),
-                        batch_start_ratio,
-                    )
-
+                
                 bulk_episodes = [
                     RawEpisode(
                         name=f"chunk-{batch_index + offset + 1}",
@@ -122,56 +96,44 @@ class GraphitiGraphBuilderService(GraphBuilderService):
                         edge_type_map=ontology.get("edge_type_map"),
                     )
 
-                stop_heartbeat = threading.Event()
-                batch_started = time.monotonic()
-
-                def _heartbeat() -> None:
-                    while not stop_heartbeat.wait(heartbeat_interval):
-                        if not progress_callback:
-                            continue
-                        elapsed = time.monotonic() - batch_started
-                        ratio = _in_batch_progress_ratio(
-                            batch_start_ratio,
-                            batch_end_ratio,
-                            elapsed,
-                            expected_batch_seconds,
-                        )
-                        progress_callback(
-                            t(
-                                "progress.processingBatch",
-                                current=batch_num,
-                                total=total_batches,
-                            ),
-                            ratio,
-                        )
-
-                heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
-                heartbeat_thread.start()
-                try:
+                async with semaphore:
                     result = await run_pipeline_step_async(
                         f"graphiti_add_episode_bulk_{batch_num}",
                         _add_batch,
                     )
-                finally:
-                    stop_heartbeat.set()
-                    heartbeat_thread.join(timeout=1)
+                    
+                    with progress_lock:
+                        completed_batches += 1
+                        if progress_callback:
+                            ratio = completed_batches / total_batches
+                            progress_callback(
+                                t(
+                                    "progress.sendingBatch",
+                                    current=completed_batches,
+                                    total=total_batches,
+                                    chunks=len(batch_chunks),
+                                ),
+                                ratio,
+                            )
+                            
+                    uuids = []
+                    for episode in getattr(result, "episodes", []) or []:
+                        episode_uuid = getattr(episode, "uuid", None)
+                        if episode_uuid:
+                            uuids.append(str(episode_uuid))
+                    return uuids
 
-                for episode in getattr(result, "episodes", []) or []:
-                    episode_uuid = getattr(episode, "uuid", None)
-                    if episode_uuid:
-                        episode_uuids.append(str(episode_uuid))
-
-                if progress_callback:
-                    progress_callback(
-                        t(
-                            "progress.sendingBatch",
-                            current=batch_num,
-                            total=total_batches,
-                            chunks=len(batch_chunks),
-                        ),
-                        batch_end_ratio,
-                    )
-
+            tasks = []
+            for batch_index in range(0, total_chunks, batch_size):
+                batch_num = batch_index // batch_size + 1
+                tasks.append(asyncio.create_task(_process_batch(batch_index, batch_num)))
+                
+            results = await asyncio.gather(*tasks)
+            
+            episode_uuids = []
+            for batch_uuids in results:
+                episode_uuids.extend(batch_uuids)
+                
             return episode_uuids
 
         return graphiti_client.run_async(_add_all_episodes())

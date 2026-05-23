@@ -397,9 +397,17 @@ def generate_ontology():
                             progress=30,
                             message=t('progress.ontologyWebSearch', count=len(queries)),
                         )
+                        
+                        def search_progress(completed: int, total: int):
+                            task_manager.update_task(
+                                task_id,
+                                progress=30 + int(completed / max(1, total) * 10),
+                            )
+                            
                         search_corpus, search_metadata = search_queries_to_corpus(
                             queries,
                             simulation_requirement=simulation_requirement,
+                            progress_callback=search_progress,
                         )
                     except ValueError as search_err:
                         code = str(search_err)
