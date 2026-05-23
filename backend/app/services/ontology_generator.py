@@ -434,14 +434,30 @@ class OntologyGenerator:
         Returns:
             Python代码字符串
         """
+        from . import _backend
+
+        if _backend.is_zep():
+            import_lines = [
+                'from pydantic import Field',
+                'from zep_cloud.external_clients.ontology import EntityModel, EntityText, EdgeModel',
+            ]
+            attr_type = "EntityText"
+        else:
+            import_lines = [
+                'from pydantic import BaseModel, Field',
+                '',
+                'EntityModel = BaseModel',
+                'EdgeModel = BaseModel',
+            ]
+            attr_type = "str | None"
+
         code_lines = [
             '"""',
             '自定义实体类型定义',
             '由MiroFish自动生成，用于社会舆论模拟',
             '"""',
             '',
-            'from pydantic import Field',
-            'from zep_cloud.external_clients.ontology import EntityModel, EntityText, EdgeModel',
+            *import_lines,
             '',
             '',
             '# ============== 实体类型定义 ==============',
@@ -461,7 +477,7 @@ class OntologyGenerator:
                 for attr in attrs:
                     attr_name = attr["name"]
                     attr_desc = attr.get("description", attr_name)
-                    code_lines.append(f'    {attr_name}: EntityText = Field(')
+                    code_lines.append(f'    {attr_name}: {attr_type} = Field(')
                     code_lines.append(f'        description="{attr_desc}",')
                     code_lines.append(f'        default=None')
                     code_lines.append(f'    )')
@@ -489,7 +505,7 @@ class OntologyGenerator:
                 for attr in attrs:
                     attr_name = attr["name"]
                     attr_desc = attr.get("description", attr_name)
-                    code_lines.append(f'    {attr_name}: EntityText = Field(')
+                    code_lines.append(f'    {attr_name}: {attr_type} = Field(')
                     code_lines.append(f'        description="{attr_desc}",')
                     code_lines.append(f'        default=None')
                     code_lines.append(f'    )')
@@ -530,4 +546,3 @@ class OntologyGenerator:
         code_lines.append('}')
         
         return '\n'.join(code_lines)
-

@@ -10,9 +10,6 @@ import threading
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass
 
-from zep_cloud.client import Zep
-from zep_cloud import EpisodeData, EntityEdgeSourceTarget
-
 from ..config import Config
 from ..models.task import TaskManager, TaskStatus
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
@@ -44,7 +41,21 @@ class GraphBuilderService:
     负责调用Zep API构建知识图谱
     """
     
+    def __new__(cls, *args, **kwargs):
+        if cls is GraphBuilderService:
+            from . import _backend
+
+            if _backend.is_graphiti():
+                from .graphiti_graph_builder import GraphitiGraphBuilderService
+
+                return GraphitiGraphBuilderService(*args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, api_key: Optional[str] = None):
+        if self.__class__ is not GraphBuilderService:
+            return
+        from zep_cloud.client import Zep
+
         self.api_key = api_key or Config.ZEP_API_KEY
         if not self.api_key:
             raise ValueError("ZEP_API_KEY is not configured")
@@ -222,6 +233,7 @@ class GraphBuilderService:
         from typing import Optional
         from pydantic import Field
         from zep_cloud.external_clients.ontology import EntityModel, EntityText, EdgeModel
+        from zep_cloud import EntityEdgeSourceTarget
         
         # 抑制 Pydantic v2 关于 Field(default=None) 的警告
         # 这是 Zep SDK 要求的用法，警告来自动态类创建，可以安全忽略
@@ -329,10 +341,9 @@ class GraphBuilderService:
                 )
             
             # 构建episode数据
-            episodes = [
-                EpisodeData(data=chunk, type="text")
-                for chunk in batch_chunks
-            ]
+            from zep_cloud import EpisodeData
+
+            episodes = [EpisodeData(data=chunk, type="text") for chunk in batch_chunks]
             
             batch_result = run_pipeline_step(
                 f"zep_add_batch_graph_{graph_id}_{batch_num}",
@@ -511,4 +522,3 @@ class GraphBuilderService:
     def delete_graph(self, graph_id: str):
         """删除图谱"""
         self.client.graph.delete(graph_id=graph_id)
-

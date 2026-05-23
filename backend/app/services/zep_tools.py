@@ -13,8 +13,6 @@ import json
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 
-from zep_cloud.client import Zep
-
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.llm_client import LLMClient
@@ -422,7 +420,21 @@ class ZepToolsService:
     MAX_RETRIES = 3
     RETRY_DELAY = 2.0
     
+    def __new__(cls, *args, **kwargs):
+        if cls is ZepToolsService:
+            from . import _backend
+
+            if _backend.is_graphiti():
+                from .graphiti_tools import GraphitiToolsService
+
+                return GraphitiToolsService(*args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, api_key: Optional[str] = None, llm_client: Optional[LLMClient] = None):
+        if self.__class__ is not ZepToolsService:
+            return
+        from zep_cloud.client import Zep
+
         self.api_key = api_key or Config.ZEP_API_KEY
         if not self.api_key:
             raise ValueError("ZEP_API_KEY 未配置")

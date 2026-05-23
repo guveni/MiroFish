@@ -12,6 +12,7 @@ from . import graph_bp
 from ..config import Config
 from ..services.ontology_generator import OntologyGenerator
 from ..services.graph_builder import GraphBuilderService
+from ..services import _backend
 from ..services.research_query_generator import ResearchQueryGenerator
 from ..services.run_checkpoint_store import (
     checkpoint_project_stage,
@@ -512,14 +513,13 @@ def build_graph():
         logger.info("=== Starting graph build ===")
         
         # Validate configuration.
-        errors = []
-        if not Config.ZEP_API_KEY:
-            errors.append(t('api.zepApiKeyMissing'))
-        if errors:
-            logger.error("Configuration errors: %s", errors)
+        backend_ok, backend_error_key = _backend.is_available()
+        if not backend_ok:
+            error = t(backend_error_key or 'api.graphBackendUnavailable')
+            logger.error("Graph backend unavailable: %s", error)
             return jsonify({
                 "success": False,
-                "error": t('api.configError', details="; ".join(errors))
+                "error": t('api.configError', details=error)
             }), 500
         
         # Parse request.
@@ -878,10 +878,11 @@ def get_graph_data(graph_id: str):
     Get graph data, including nodes and edges.
     """
     try:
-        if not Config.ZEP_API_KEY:
+        backend_ok, backend_error_key = _backend.is_available()
+        if not backend_ok:
             return jsonify({
                 "success": False,
-                "error": t('api.zepApiKeyMissing')
+                "error": t(backend_error_key or 'api.graphBackendUnavailable')
             }), 500
         
         builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
@@ -903,13 +904,14 @@ def get_graph_data(graph_id: str):
 @graph_bp.route('/delete/<graph_id>', methods=['DELETE'])
 def delete_graph(graph_id: str):
     """
-    Delete a Zep graph.
+    Delete a knowledge graph.
     """
     try:
-        if not Config.ZEP_API_KEY:
+        backend_ok, backend_error_key = _backend.is_available()
+        if not backend_ok:
             return jsonify({
                 "success": False,
-                "error": t('api.zepApiKeyMissing')
+                "error": t(backend_error_key or 'api.graphBackendUnavailable')
             }), 500
         
         builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)

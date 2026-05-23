@@ -102,6 +102,7 @@ Click the image to watch MiroFish's deep prediction of the lost ending based on 
 | **Node.js** | 18+ | Frontend runtime, includes npm | `node -v` |
 | **Python** | ≥3.11, ≤3.12 | Backend runtime | `python --version` |
 | **uv** | Latest | Python package manager | `uv --version` |
+| **Docker** | Latest | Runs the default Neo4j graph backend | `docker --version` |
 
 #### 1. Configure Environment Variables
 
@@ -122,10 +123,18 @@ LLM_API_KEY=your_api_key
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_MODEL_NAME=qwen-plus
 
-# Zep Cloud Configuration
-# Free monthly quota is sufficient for simple usage: https://app.getzep.com/
-ZEP_API_KEY=your_zep_api_key
+# Graph memory (default: Neo4j + Graphiti)
+# npm run dev starts the Neo4j container automatically.
+GRAPH_BACKEND=neo4j
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=mirofish-dev
 ```
+
+Zep Cloud remains available as a legacy opt-in path. Set `GRAPH_BACKEND=zep`,
+add `ZEP_API_KEY`, and run `cd backend && uv sync --extra zep`. Data does not
+move between graph backends; rebuild the graph from the source document after
+switching.
 
 #### 2. Install Dependencies
 
@@ -147,13 +156,23 @@ npm run setup:backend
 #### 3. Start Services
 
 ```bash
-# Start both frontend and backend (run from project root)
+# Start Neo4j, backend, and frontend (run from project root)
 npm run dev
 ```
 
 **Service URLs:**
 - Frontend: `http://localhost:3000`
 - Backend API: `http://localhost:5001`
+- Neo4j Browser: `http://localhost:7474`
+
+Useful graph backend commands:
+
+```bash
+npm run graph:up
+npm run graph:down
+npm run graph:logs
+npm run dev:no-graph   # skip Neo4j auto-start, useful for GRAPH_BACKEND=zep
+```
 
 **Start Individually:**
 

@@ -19,8 +19,12 @@ google-genai>=1.0.0
 # LangSmith traces for OpenAI SDK (optional; LANGSMITH_TRACING + LANGSMITH_API_KEY)
 langsmith>=0.8.0
 
-# ============= Zep Cloud =============
-zep-cloud==3.13.0
+# ============= Graph memory (Neo4j + Graphiti default) =============
+graphiti-core[google-genai]>=0.29.0
+neo4j>=5.26,<6
+
+# ============= Legacy Zep Cloud (optional: GRAPH_BACKEND=zep) =============
+# zep-cloud==3.13.0
 
 # ============= OASIS 社交媒体模拟 =============
 # OASIS 社交模拟框架

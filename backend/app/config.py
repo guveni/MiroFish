@@ -97,7 +97,17 @@ class Config:
     GEMINI_WEB_SEARCH_MAX_CHARS = int(os.environ.get('GEMINI_WEB_SEARCH_MAX_CHARS', '25000'))
     GEMINI_WEB_SEARCH_MAX_OUTPUT_TOKENS = int(os.environ.get('GEMINI_WEB_SEARCH_MAX_OUTPUT_TOKENS', '8192'))
     
-    # Zep settings
+    # Graph memory backend. Unset/empty defaults to Neo4j + Graphiti.
+    GRAPH_BACKEND = (os.environ.get('GRAPH_BACKEND') or 'neo4j').strip().lower()
+    NEO4J_URI = (os.environ.get('NEO4J_URI') or 'bolt://localhost:7687').strip()
+    NEO4J_USER = (os.environ.get('NEO4J_USER') or 'neo4j').strip()
+    NEO4J_PASSWORD = os.environ.get('NEO4J_PASSWORD') or 'mirofish-dev'
+    NEO4J_DATABASE = (os.environ.get('NEO4J_DATABASE') or 'neo4j').strip()
+    GRAPHITI_EMBEDDER = (os.environ.get('GRAPHITI_EMBEDDER') or 'auto').strip().lower()
+    GRAPHITI_RERANKER = (os.environ.get('GRAPHITI_RERANKER') or 'auto').strip().lower()
+    GRAPHITI_SEMAPHORE_LIMIT = int(os.environ.get('GRAPHITI_SEMAPHORE_LIMIT', '10'))
+
+    # Legacy Zep settings
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
     
     # File upload settings
@@ -153,6 +163,15 @@ class Config:
         return cls.LLM_MODEL_NAME
 
     @classmethod
+    def normalized_graph_backend(cls) -> str:
+        backend = (cls.GRAPH_BACKEND or 'neo4j').strip().lower()
+        if backend in ('neo4j', 'graphiti'):
+            return 'graphiti'
+        if backend == 'zep':
+            return 'zep'
+        return backend
+
+    @classmethod
     def validate(cls):
         """Validate required configuration."""
         errors = []
@@ -176,8 +195,17 @@ class Config:
                 )
         elif not cls.LLM_API_KEY:
             errors.append("LLM_API_KEY is not configured")
-        if not cls.ZEP_API_KEY:
-            errors.append("ZEP_API_KEY is not configured")
+        graph_backend = cls.normalized_graph_backend()
+        if graph_backend == 'zep':
+            if not cls.ZEP_API_KEY:
+                errors.append("ZEP_API_KEY is not configured")
+        elif graph_backend == 'graphiti':
+            if not cls.NEO4J_URI:
+                errors.append("NEO4J_URI is not configured")
+            if not cls.NEO4J_PASSWORD:
+                errors.append("NEO4J_PASSWORD is not configured")
+        else:
+            errors.append("GRAPH_BACKEND must be one of: neo4j, graphiti, zep")
         if not cls.LLM_MODEL_NAME and cls.LLM_PROVIDER != 'azure':
             errors.append("LLM_MODEL_NAME is not configured")
         return errors

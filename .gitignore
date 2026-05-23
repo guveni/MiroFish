@@ -60,3 +60,4 @@ backend/uploads/
 
 # Docker data
 data/
+.cache/

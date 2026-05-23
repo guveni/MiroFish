@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from queue import Queue, Empty
 
-from zep_cloud.client import Zep
-
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.locale import get_locale, set_locale
@@ -229,7 +227,21 @@ class ZepGraphMemoryUpdater:
     MAX_RETRIES = 3
     RETRY_DELAY = 2  # 秒
     
+    def __new__(cls, *args, **kwargs):
+        if cls is ZepGraphMemoryUpdater:
+            from . import _backend
+
+            if _backend.is_graphiti():
+                from .graphiti_graph_memory_updater import GraphitiGraphMemoryUpdater
+
+                return GraphitiGraphMemoryUpdater(*args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, graph_id: str, api_key: Optional[str] = None):
+        if self.__class__ is not ZepGraphMemoryUpdater:
+            return
+        from zep_cloud.client import Zep
+
         """
         初始化更新器
         

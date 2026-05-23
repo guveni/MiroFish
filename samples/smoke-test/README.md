@@ -1,11 +1,12 @@
 # Smoke-test sample (`samples/smoke-test`)
 
-Use this to verify LLM access, Zep, graph build, and the UI flow **without writing your own scenario first**.
+Use this to verify LLM access, the graph backend, graph build, and the UI flow **without writing your own scenario first**.
 
 ## What you need
 
-- `.env` at the repo root with **LLM** (or Vertex ADC) + **ZEP_API_KEY**, as in the root `README.md`.
-- Backend **`:5001`**, frontend **`http://localhost:3000`** (see `frontend/vite.config.js`; `npm run dev` starts both).
+- `.env` at the repo root with **LLM** credentials (or Vertex ADC), as in the root `README.md`.
+- Docker running for the default Neo4j + Graphiti backend. `npm run dev` starts Neo4j automatically.
+- Backend **`:5001`**, frontend **`http://localhost:3000`** (see `frontend/vite.config.js`; `npm run dev` starts Neo4j and both app services).
 
 To **cut cost and latency** during tests, optionally add this to `.env`:
 
@@ -31,7 +32,7 @@ Expect `{"status": "ok", "service": "MiroFish Backend"}`.
 4. In the prediction / simulation-requirement box, paste the paragraph from **`simulation-requirement.txt`** (everything after the first line, or paste the whole file).
 5. Proceed through ontology → graph build → simulation steps as prompted.
 
-**Expect:** ontology JSON, a Zep-backed graph phase, then a simulation run. First-time LLM + Zep usage can take several minutes depending on quotas and region.
+**Expect:** ontology JSON, a graph build phase, then a simulation run. First-time LLM + graph ingestion can take several minutes depending on quotas and region.
 
 ## 3) Optional: API-onlyontology step
 
@@ -49,5 +50,5 @@ Success returns `"success": true` and a `project_id`; use that ID in subsequent 
 ## Troubleshooting
 
 - **401 / auth errors:** verify LLM credentials or rerun `gcloud auth application-default login` for Vertex.
-- **Zep errors:** confirm `ZEP_API_KEY` and Zep project quotas.
+- **Graph backend errors:** for the default path, confirm Docker is running and try `npm run graph:logs`. For legacy Zep, set `GRAPH_BACKEND=zep`, `ZEP_API_KEY`, install with `cd backend && uv sync --extra zep`, and start with `npm run dev:no-graph`.
 - **`requireFileUpload`:** ensure the multipart field name is **`files`** and the suffix is `.txt`, `.md`, or `.pdf`.

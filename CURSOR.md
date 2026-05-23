@@ -22,13 +22,19 @@ Installs root dependencies, frontend dependencies, and backend Python dependenci
 cp .env.example .env
 ```
 
-Creates the local environment file. Fill in required API keys before starting services.
+Creates the local environment file. Fill in required LLM credentials before starting services. The default graph backend is Neo4j + Graphiti and `npm run dev` starts Neo4j with Docker.
 
 ```bash
 npm run dev
 ```
 
-Starts the backend and frontend together. The frontend runs at `http://localhost:3000`; the backend API runs at `http://localhost:5001`.
+Starts Neo4j, the backend, and the frontend together. The frontend runs at `http://localhost:3000`; the backend API runs at `http://localhost:5001`; Neo4j Browser runs at `http://localhost:7474`.
+
+```bash
+npm run dev:no-graph
+```
+
+Skips Neo4j management, useful when using legacy Zep Cloud with `GRAPH_BACKEND=zep`, `ZEP_API_KEY`, and `cd backend && uv sync --extra zep`. Switching graph backends requires rebuilding graphs from source documents.
 
 ## Common Checks
 

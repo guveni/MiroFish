@@ -7,8 +7,6 @@ import time
 from typing import Dict, Any, List, Optional, Set, Callable, TypeVar
 from dataclasses import dataclass, field
 
-from zep_cloud.client import Zep
-
 from ..config import Config
 from ..utils.logger import get_logger
 from ..utils.zep_paging import fetch_all_nodes, fetch_all_edges
@@ -78,7 +76,21 @@ class ZepEntityReader:
     3. 获取每个实体的相关边和关联节点信息
     """
     
+    def __new__(cls, *args, **kwargs):
+        if cls is ZepEntityReader:
+            from . import _backend
+
+            if _backend.is_graphiti():
+                from .graphiti_entity_reader import GraphitiEntityReader
+
+                return GraphitiEntityReader(*args, **kwargs)
+        return super().__new__(cls)
+
     def __init__(self, api_key: Optional[str] = None):
+        if self.__class__ is not ZepEntityReader:
+            return
+        from zep_cloud.client import Zep
+
         self.api_key = api_key or Config.ZEP_API_KEY
         if not self.api_key:
             raise ValueError("ZEP_API_KEY 未配置")
@@ -433,5 +445,3 @@ class ZepEntityReader:
             enrich_with_edges=enrich_with_edges
         )
         return result.entities
-
-

@@ -15,13 +15,12 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from zep_cloud.client import Zep
-
 from ..config import Config
 from ..utils.llm_client import LLMClient
 from ..utils.logger import get_logger
 from ..utils.locale import get_language_instruction, get_locale, set_locale, t
 from .zep_entity_reader import EntityNode, ZepEntityReader
+from .zep_tools import ZepToolsService
 
 logger = get_logger('mirofish.oasis_profile')
 
@@ -193,16 +192,15 @@ class OasisProfileGenerator:
         )
         self.model_name = self.llm_client.model
         
-        # Zep client for context enrichment.
+        # Graph search service for context enrichment.
         self.zep_api_key = zep_api_key or Config.ZEP_API_KEY
-        self.zep_client = None
+        self.graph_tools = None
         self.graph_id = graph_id
         
-        if self.zep_api_key:
-            try:
-                self.zep_client = Zep(api_key=self.zep_api_key)
-            except Exception as e:
-                logger.warning("Zep client initialization failed: %s", e)
+        try:
+            self.graph_tools = ZepToolsService(api_key=self.zep_api_key)
+        except Exception as e:
+            logger.warning("Graph search service initialization failed: %s", e)
 
     def generate_profile_from_entity(
         self, 
@@ -293,7 +291,7 @@ class OasisProfileGenerator:
         """
         import concurrent.futures
         
-        if not self.zep_client:
+        if not self.graph_tools:
             return {"facts": [], "node_summaries": [], "context": ""}
         
         entity_name = entity.name
@@ -319,12 +317,11 @@ class OasisProfileGenerator:
             
             for attempt in range(max_retries):
                 try:
-                    return self.zep_client.graph.search(
+                    return self.graph_tools.search_graph(
                         query=comprehensive_query,
                         graph_id=self.graph_id,
                         limit=30,
                         scope="edges",
-                        reranker="rrf"
                     )
                 except Exception as e:
                     last_exception = e
@@ -344,12 +341,11 @@ class OasisProfileGenerator:
             
             for attempt in range(max_retries):
                 try:
-                    return self.zep_client.graph.search(
+                    return self.graph_tools.search_graph(
                         query=comprehensive_query,
                         graph_id=self.graph_id,
                         limit=20,
                         scope="nodes",
-                        reranker="rrf"
                     )
                 except Exception as e:
                     last_exception = e
@@ -373,20 +369,23 @@ class OasisProfileGenerator:
             
             # Process edge search results.
             all_facts = set()
-            if edge_result and hasattr(edge_result, 'edges') and edge_result.edges:
+            if edge_result and getattr(edge_result, 'edges', None):
                 for edge in edge_result.edges:
-                    if hasattr(edge, 'fact') and edge.fact:
-                        all_facts.add(edge.fact)
+                    fact = edge.get("fact") if isinstance(edge, dict) else getattr(edge, "fact", "")
+                    if fact:
+                        all_facts.add(fact)
             results["facts"] = list(all_facts)
             
             # Process node search results.
             all_summaries = set()
-            if node_result and hasattr(node_result, 'nodes') and node_result.nodes:
+            if node_result and getattr(node_result, 'nodes', None):
                 for node in node_result.nodes:
-                    if hasattr(node, 'summary') and node.summary:
-                        all_summaries.add(node.summary)
-                    if hasattr(node, 'name') and node.name and node.name != entity_name:
-                        all_summaries.add(f"Related entity: {node.name}")
+                    summary = node.get("summary") if isinstance(node, dict) else getattr(node, "summary", "")
+                    name = node.get("name") if isinstance(node, dict) else getattr(node, "name", "")
+                    if summary:
+                        all_summaries.add(summary)
+                    if name and name != entity_name:
+                        all_summaries.add(f"Related entity: {name}")
             results["node_summaries"] = list(all_summaries)
             
             # Build combined context.

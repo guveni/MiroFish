@@ -1,0 +1,287 @@
+"""Shared Graphiti client and sync bridge."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import threading
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
+
+from pydantic import BaseModel, Field
+
+from ..config import Config
+from .logger import get_logger
+from .vertex_openai import effective_llm_api_key_or_vertex_token, effective_llm_base_url
+
+logger = get_logger("mirofish.graphiti")
+
+_loop: asyncio.AbstractEventLoop | None = None
+_loop_thread: threading.Thread | None = None
+_loop_lock = threading.Lock()
+_client: Any | None = None
+_client_lock = threading.Lock()
+_indices_ready = False
+_ontology_lock = threading.Lock()
+_ontology_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _ensure_loop() -> asyncio.AbstractEventLoop:
+    global _loop, _loop_thread
+    with _loop_lock:
+        if _loop and _loop.is_running():
+            return _loop
+
+        loop = asyncio.new_event_loop()
+
+        def run_loop() -> None:
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        thread = threading.Thread(target=run_loop, name="GraphitiLoop", daemon=True)
+        thread.start()
+        _loop = loop
+        _loop_thread = thread
+        return loop
+
+
+def run_async(coro):
+    """Run a Graphiti coroutine on the shared background event loop."""
+    loop = _ensure_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
+
+
+def _set_default_openai_env() -> None:
+    """Provide Graphiti's OpenAI-compatible defaults from MiroFish config."""
+    if Config.LLM_PROVIDER == "azure":
+        return
+    if Config.LLM_PROVIDER == "vertex":
+        os.environ.setdefault("OPENAI_API_KEY", effective_llm_api_key_or_vertex_token())
+        os.environ.setdefault("OPENAI_BASE_URL", effective_llm_base_url())
+    else:
+        if Config.LLM_API_KEY:
+            os.environ.setdefault("OPENAI_API_KEY", Config.LLM_API_KEY)
+        if Config.LLM_BASE_URL:
+            os.environ.setdefault("OPENAI_BASE_URL", Config.LLM_BASE_URL)
+    if Config.LLM_MODEL_NAME:
+        os.environ.setdefault("MODEL_NAME", Config.LLM_MODEL_NAME)
+
+
+def _build_openai_clients() -> tuple[Any | None, Any | None, Any | None]:
+    from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.llm_client.openai_client import OpenAIClient
+
+    api_key = (
+        effective_llm_api_key_or_vertex_token()
+        if Config.LLM_PROVIDER == "vertex"
+        else Config.LLM_API_KEY
+    )
+    base_url = effective_llm_base_url() if Config.LLM_PROVIDER == "vertex" else Config.LLM_BASE_URL
+    model = Config.require_llm_model_name()
+    llm = OpenAIClient(config=LLMConfig(api_key=api_key, base_url=base_url, model=model))
+    embedder = OpenAIEmbedder(
+        config=OpenAIEmbedderConfig(
+            api_key=api_key,
+            base_url=base_url,
+            embedding_model=os.environ.get("GRAPHITI_EMBEDDING_MODEL", "text-embedding-3-small"),
+        )
+    )
+    return llm, embedder, None
+
+
+def _build_azure_clients() -> tuple[Any | None, Any | None, Any | None]:
+    try:
+        from openai import AsyncAzureOpenAI
+        from graphiti_core.embedder.azure_openai import AzureOpenAIEmbedderClient
+        from graphiti_core.llm_client.azure_openai_client import AzureOpenAILLMClient
+        from graphiti_core.llm_client.config import LLMConfig
+    except Exception as exc:
+        raise RuntimeError("Graphiti Azure clients are not available") from exc
+
+    azure_client = AsyncAzureOpenAI(
+        api_key=Config.AZURE_OPENAI_API_KEY,
+        azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
+        api_version=Config.AZURE_OPENAI_API_VERSION,
+    )
+    llm = AzureOpenAILLMClient(
+        azure_client=azure_client,
+        config=LLMConfig(model=Config.AZURE_OPENAI_DEPLOYMENT),
+    )
+    embedder = AzureOpenAIEmbedderClient(
+        azure_client=azure_client,
+        model=os.environ.get("GRAPHITI_AZURE_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"),
+    )
+    return llm, embedder, None
+
+
+def _build_gemini_clients() -> tuple[Any | None, Any | None, Any | None]:
+    try:
+        from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
+        from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
+    except Exception as exc:
+        raise RuntimeError("Graphiti Gemini clients are not available") from exc
+
+    model = Config.require_llm_model_name()
+    model = model.split("/", 1)[1] if model.startswith("google/") else model
+    llm = GeminiClient(config=LLMConfig(model=model))
+    embedder = GeminiEmbedder(
+        config=GeminiEmbedderConfig(
+            embedding_model=os.environ.get("GRAPHITI_GEMINI_EMBEDDING_MODEL", "text-embedding-004")
+        )
+    )
+    return llm, embedder, None
+
+
+def _build_clients() -> tuple[Any | None, Any | None, Any | None]:
+    embedder = Config.GRAPHITI_EMBEDDER
+    provider = Config.LLM_PROVIDER
+    if provider == "azure" or embedder == "azure":
+        return _build_azure_clients()
+    if provider == "vertex" or embedder == "vertex":
+        try:
+            return _build_gemini_clients()
+        except Exception as exc:
+            logger.warning("Falling back to OpenAI-compatible Graphiti clients: %s", exc)
+    if embedder == "local":
+        logger.warning("GRAPHITI_EMBEDDER=local is not bundled; using OpenAI-compatible embeddings")
+    return _build_openai_clients()
+
+
+async def _ensure_indices(graphiti: Any) -> None:
+    global _indices_ready
+    if _indices_ready:
+        return
+    await graphiti.build_indices_and_constraints()
+    _indices_ready = True
+
+
+def get_client():
+    global _client
+    with _client_lock:
+        if _client is not None:
+            return _client
+
+        from graphiti_core import Graphiti
+        from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+        _set_default_openai_env()
+        llm_client, embedder, cross_encoder = _build_clients()
+        driver = Neo4jDriver(
+            Config.NEO4J_URI,
+            Config.NEO4J_USER,
+            Config.NEO4J_PASSWORD,
+            database=Config.NEO4J_DATABASE,
+        )
+        _client = Graphiti(
+            graph_driver=driver,
+            llm_client=llm_client,
+            embedder=embedder,
+            cross_encoder=cross_encoder,
+            max_coroutines=Config.GRAPHITI_SEMAPHORE_LIMIT,
+        )
+    run_async(_ensure_indices(_client))
+    return _client
+
+
+def is_available() -> tuple[bool, str | None]:
+    if not Config.NEO4J_URI or not Config.NEO4J_PASSWORD:
+        return False, "api.graphBackendUnavailable"
+    try:
+        from neo4j import GraphDatabase
+
+        driver = GraphDatabase.driver(
+            Config.NEO4J_URI,
+            auth=(Config.NEO4J_USER or "", Config.NEO4J_PASSWORD or ""),
+        )
+        try:
+            driver.verify_connectivity()
+        finally:
+            driver.close()
+        return True, None
+    except Exception as exc:
+        logger.warning("Graphiti backend unavailable: %s", exc)
+        return False, "api.graphBackendUnavailable"
+
+
+def _safe_class_name(name: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() else " " for ch in name).strip()
+    pascal = "".join(part[:1].upper() + part[1:] for part in cleaned.split())
+    return pascal or "Entity"
+
+
+def _safe_attr_name(attr_name: str) -> str:
+    reserved = {"uuid", "name", "group_id", "name_embedding", "summary", "created_at"}
+    normalized = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in attr_name).strip("_")
+    if not normalized:
+        normalized = "value"
+    if normalized.lower() in reserved:
+        return f"entity_{normalized}"
+    return normalized
+
+
+def _model_from_definition(name: str, description: str, attributes: list[dict[str, Any]]):
+    annotations: dict[str, Any] = {}
+    fields: dict[str, Any] = {"__doc__": description}
+    for attr_def in attributes:
+        attr_name = _safe_attr_name(str(attr_def.get("name") or "value"))
+        attr_desc = str(attr_def.get("description") or attr_name)
+        annotations[attr_name] = Optional[str]
+        fields[attr_name] = Field(default=None, description=attr_desc)
+    fields["__annotations__"] = annotations
+    return type(_safe_class_name(name), (BaseModel,), fields)
+
+
+def register_ontology(group_id: str, ontology: dict[str, Any]) -> dict[str, Any]:
+    with _ontology_lock:
+        if group_id in _ontology_cache:
+            return _ontology_cache[group_id]
+
+        entity_types = {}
+        for entity_def in ontology.get("entity_types", []):
+            name = str(entity_def.get("name") or "Entity")
+            description = str(entity_def.get("description") or f"A {name} entity.")
+            entity_types[name] = _model_from_definition(
+                name,
+                description,
+                entity_def.get("attributes", []),
+            )
+
+        edge_types = {}
+        edge_type_map: dict[tuple[str, str], list[str]] = {}
+        for edge_def in ontology.get("edge_types", []):
+            name = str(edge_def.get("name") or "RELATES_TO")
+            description = str(edge_def.get("description") or f"A {name} relationship.")
+            edge_types[name] = _model_from_definition(
+                name,
+                description,
+                edge_def.get("attributes", []),
+            )
+            for source_target in edge_def.get("source_targets", []):
+                source = str(source_target.get("source") or "Entity")
+                target = str(source_target.get("target") or "Entity")
+                edge_type_map.setdefault((source, target), []).append(name)
+
+        if edge_types and not edge_type_map:
+            edge_type_map[("Entity", "Entity")] = list(edge_types.keys())
+
+        cached = {
+            "entity_types": entity_types or None,
+            "edge_types": edge_types or None,
+            "edge_type_map": edge_type_map or None,
+        }
+        _ontology_cache[group_id] = cached
+        return cached
+
+
+def get_ontology(group_id: str) -> dict[str, Any]:
+    with _ontology_lock:
+        return _ontology_cache.get(
+            group_id,
+            {"entity_types": None, "edge_types": None, "edge_type_map": None},
+        )
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)

@@ -16,13 +16,15 @@ MiroFish is a swarm-intelligence prediction engine with a Flask backend and Vue 
 - `npm run setup:all`: install root, frontend, and backend dependencies.
 - `npm run setup`: install Node dependencies for the root and frontend.
 - `npm run setup:backend`: sync backend dependencies with `uv`.
-- `npm run dev`: run frontend and backend together.
+- `npm run dev`: start the default Neo4j graph container, backend, and frontend together.
+- `npm run dev:no-graph`: run frontend and backend without managing Neo4j, useful for `GRAPH_BACKEND=zep`.
+- `npm run graph:up` / `npm run graph:down` / `npm run graph:logs`: manage the local Neo4j graph backend.
 - `npm run backend`: run only the backend.
 - `npm run frontend`: run only the frontend.
 - `npm run build`: build the frontend.
 - `npm run verify:gemini`: verify Gemini Vertex configuration.
 
-Create `.env` from `.env.example` before running services. Never expose API keys or local secrets in commits, logs, or generated docs.
+Create `.env` from `.env.example` before running services. The default graph backend is Neo4j + Graphiti and `npm run dev` auto-starts Neo4j with Docker. Legacy Zep Cloud is opt-in via `GRAPH_BACKEND=zep`, `ZEP_API_KEY`, and `cd backend && uv sync --extra zep`; switching graph backends requires rebuilding graphs from source documents. Never expose API keys or local secrets in commits, logs, or generated docs.
 
 ## Repository Rules
 

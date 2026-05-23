@@ -122,10 +122,17 @@ LLM_API_KEY=your_api_key
 LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 LLM_MODEL_NAME=qwen-plus
 
-# Zep Cloud 配置
-# 每月免费额度即可支撑简单使用：https://app.getzep.com/
-ZEP_API_KEY=your_zep_api_key
+# 图谱记忆（默认：Neo4j + Graphiti）
+# npm run dev 会自动启动本地 Neo4j 容器
+GRAPH_BACKEND=neo4j
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=mirofish-dev
 ```
+
+Zep Cloud 仍作为旧版可选路径保留：设置 `GRAPH_BACKEND=zep`，添加
+`ZEP_API_KEY`，并执行 `cd backend && uv sync --extra zep`。切换图谱后端
+不会迁移已有图谱数据，需要从源文档重新构建。
 
 #### 2. 安装依赖
 
@@ -147,13 +154,23 @@ npm run setup:backend
 #### 3. 启动服务
 
 ```bash
-# 同时启动前后端（在项目根目录执行）
+# 启动 Neo4j、后端和前端（在项目根目录执行）
 npm run dev
 ```
 
 **服务地址：**
 - 前端：`http://localhost:3000`
 - 后端 API：`http://localhost:5001`
+- Neo4j Browser：`http://localhost:7474`
+
+常用图谱后端命令：
+
+```bash
+npm run graph:up
+npm run graph:down
+npm run graph:logs
+npm run dev:no-graph   # 使用 GRAPH_BACKEND=zep 时跳过 Neo4j
+```
 
 **单独启动：**
 

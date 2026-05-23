@@ -10,12 +10,15 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from zep_cloud import InternalServerError
-from zep_cloud.client import Zep
-
 from .logger import get_logger
 
 logger = get_logger('mirofish.zep_paging')
+
+try:
+    from zep_cloud import InternalServerError
+except Exception:
+    class InternalServerError(Exception):
+        pass
 
 _DEFAULT_PAGE_SIZE = 100
 _MAX_NODES = 2000
@@ -57,7 +60,7 @@ def _fetch_page_with_retry(
 
 
 def fetch_all_nodes(
-    client: Zep,
+    client: Any,
     graph_id: str,
     page_size: int = _DEFAULT_PAGE_SIZE,
     max_items: int = _MAX_NODES,
@@ -103,7 +106,7 @@ def fetch_all_nodes(
 
 
 def fetch_all_edges(
-    client: Zep,
+    client: Any,
     graph_id: str,
     page_size: int = _DEFAULT_PAGE_SIZE,
     max_retries: int = _DEFAULT_MAX_RETRIES,

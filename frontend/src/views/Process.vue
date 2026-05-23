@@ -355,7 +355,7 @@
               <div class="detail-section">
                 <div class="detail-label">What this step does</div>
                 <div class="detail-content">
-                  Using the ontology, text is chunked and sent to the Zep API to build a knowledge graph of entities and relations.
+                  Using the ontology, text is chunked and sent to the knowledge graph backend to build entities and relations.
                 </div>
               </div>
               
