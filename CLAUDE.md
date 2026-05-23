@@ -24,6 +24,10 @@ MiroFish is a swarm-intelligence prediction engine with a Flask backend and Vue 
 - `npm run build`: build the frontend.
 - `npm run verify:gemini`: verify Gemini Vertex configuration.
 
+## Agent commands
+
+- `/english-only` (`.claude/commands/english-only.md`): translate non-English text to English in touched files; use for translation sweeps or before large refactors.
+
 Create `.env` from `.env.example` before running services. The default graph backend is Neo4j + Graphiti and `npm run dev` auto-starts Neo4j with Docker. Legacy Zep Cloud is opt-in via `GRAPH_BACKEND=zep`, `ZEP_API_KEY`, and `cd backend && uv sync --extra zep`; switching graph backends requires rebuilding graphs from source documents. Never expose API keys or local secrets in commits, logs, or generated docs.
 
 ## Repository Rules

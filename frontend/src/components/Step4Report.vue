@@ -136,6 +136,18 @@
             </svg>
           </button>
 
+          <!-- Continue/Retry Button - 在失败时显示 -->
+          <button v-if="isFailed" class="next-step-btn retry-btn" @click="handleContinue" :disabled="isContinuing">
+            <span>{{ isContinuing ? $t('step4.continuing') : $t('step4.continueGeneration') }}</span>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" class="spin-icon" v-if="isContinuing">
+              <circle cx="12" cy="12" r="10" stroke-width="4" stroke="#E5E7EB"></circle>
+              <path d="M12 2a10 10 0 0 1 10 10" stroke-width="4" stroke="#4B5563" stroke-linecap="round"></path>
+            </svg>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" v-else>
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+            </svg>
+          </button>
+
           <div class="workflow-divider"></div>
         </div>
 
@@ -393,7 +405,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { getAgentLog, getConsoleLog } from '../api/report'
+import { getAgentLog, getConsoleLog, generateReport } from '../api/report'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -425,6 +437,8 @@ const expandedContent = ref(new Set())
 const expandedLogs = ref(new Set())
 const collapsedSections = ref(new Set())
 const isComplete = ref(false)
+const isFailed = ref(false)
+const isContinuing = ref(false)
 const startTime = ref(null)
 const leftPanel = ref(null)
 const rightPanel = ref(null)
@@ -2054,10 +2068,18 @@ const fetchAgentLog = async () => {
           
           if (log.action === 'report_complete') {
             isComplete.value = true
+            isFailed.value = false
             currentSectionIndex.value = null  // 确保清除 loading 状态
             emit('update-status', 'completed')
             stopPolling()
             // 滚动逻辑统一在循环结束后的 nextTick 中处理
+          }
+          
+          if (log.action === 'error') {
+            isFailed.value = true
+            currentSectionIndex.value = null
+            emit('update-status', 'error')
+            stopPolling()
           }
           
           if (log.action === 'report_start') {
@@ -2151,6 +2173,35 @@ const fetchConsoleLog = async () => {
     }
   } catch (err) {
     console.warn('Failed to fetch console log:', err)
+  }
+}
+
+const handleContinue = async () => {
+  if (isContinuing.value) return
+  isContinuing.value = true
+  isFailed.value = false
+  emit('update-status', 'processing')
+  
+  try {
+    const res = await generateReport({
+      simulation_id: props.simulationId,
+      report_id: props.reportId,
+      force_regenerate: false
+    })
+    
+    if (res.success) {
+      // Restart polling
+      startPolling()
+    } else {
+      isFailed.value = true
+      emit('update-status', 'error')
+    }
+  } catch (err) {
+    console.error('Failed to continue report:', err)
+    isFailed.value = true
+    emit('update-status', 'error')
+  } finally {
+    isContinuing.value = false
   }
 }
 
@@ -3430,6 +3481,28 @@ watch(() => props.reportId, (newId) => {
 
 .next-step-btn:hover svg {
   transform: translateX(4px);
+}
+
+.next-step-btn.retry-btn {
+  background: #3B82F6;
+}
+
+.next-step-btn.retry-btn:hover {
+  background: #2563EB;
+}
+
+.next-step-btn.retry-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 /* Workflow Empty */

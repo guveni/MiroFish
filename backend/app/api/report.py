@@ -106,9 +106,17 @@ def generate_report():
                 "error": t('api.missingSimRequirement')
             }), 400
         
-        # 提前生成 report_id，以便立即返回给前端
-        import uuid
-        report_id = f"report_{uuid.uuid4().hex[:12]}"
+        # 提前获取/生成 report_id，以便立即返回给前端
+        report_id = data.get('report_id')
+        if not report_id:
+            if not force_regenerate:
+                existing_report = ReportManager.get_report_by_simulation(simulation_id)
+                if existing_report:
+                    report_id = existing_report.report_id
+            
+            if not report_id:
+                import uuid
+                report_id = f"report_{uuid.uuid4().hex[:12]}"
         
         # 创建异步任务
         task_manager = TaskManager()

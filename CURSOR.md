@@ -8,6 +8,12 @@ This repository includes Cursor project rules in `.cursor/rules/`. Open the repo
 - `.cursor/rules/mirofish-project.mdc`: explains the repo layout, commands, and verification expectations.
 - `.cursor/rules/karpathy-guidelines.mdc`: adds the Karpathy-inspired agent discipline for cautious, minimal, verifiable edits.
 
+## Slash Commands
+
+Type `/` in Cursor chat to run project commands from `.cursor/commands/`:
+
+- `/english-only`: translate non-English text to English in every file touched in the session (comments, logs, UI, docs). Aligns with `.cursor/rules/english-only.mdc`.
+
 ## Setup Commands
 
 Run these from the repository root:

@@ -224,15 +224,16 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         response_format: Optional[Dict] = None
     ) -> str:
         """Send a chat completion request and return text content."""
+        actual_max_tokens = max_tokens if max_tokens is not None else Config.LLM_CHAT_MAX_TOKENS
         kwargs = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": actual_max_tokens,
         }
         
         if response_format:
@@ -266,15 +267,16 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         response_format: Optional[Dict] = None
     ) -> str:
         """Async chat completion request returning text content."""
+        actual_max_tokens = max_tokens if max_tokens is not None else Config.LLM_CHAT_MAX_TOKENS
         kwargs = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": actual_max_tokens,
         }
 
         if response_format:
@@ -306,13 +308,14 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
-        max_tokens: int = 4096
+        max_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """Send a chat request and parse a JSON object from the response."""
+        actual_max_tokens = max_tokens if max_tokens is not None else Config.LLM_JSON_MAX_TOKENS
         response = self.chat(
             messages=messages,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=actual_max_tokens,
             response_format={"type": "json_object"}
         )
         return parse_llm_json_response(response)
@@ -321,13 +324,14 @@ class LLMClient:
         self,
         messages: List[Dict[str, str]],
         temperature: float = 0.3,
-        max_tokens: int = 4096
+        max_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """Async chat request parsed as a JSON object."""
+        actual_max_tokens = max_tokens if max_tokens is not None else Config.LLM_JSON_MAX_TOKENS
         response = await self.achat(
             messages=messages,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=actual_max_tokens,
             response_format={"type": "json_object"}
         )
         return parse_llm_json_response(response)

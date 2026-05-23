@@ -28,6 +28,10 @@ MiroFish is a multi-agent prediction and simulation app.
 
 Before running the app, create `.env` from `.env.example` and fill in the required LLM credentials. The default graph backend is Neo4j + Graphiti and `npm run dev` auto-starts Neo4j with Docker. Legacy Zep Cloud is opt-in via `GRAPH_BACKEND=zep`, `ZEP_API_KEY`, and `cd backend && uv sync --extra zep`. Switching graph backends requires rebuilding graphs from source documents. Do not commit secrets or local credentials.
 
+## Agent workflows
+
+- **English-only sweep**: run the `english-only` skill (`.agents/skills/english-only/`) or ask Codex to enforce English-only and translate non-English in every file touched. Product copy belongs in `locales/en.json` via i18n.
+
 ## Coding Standards
 
 - Write new and modified code, comments, prompts, logs, Markdown, and UI copy in English.
