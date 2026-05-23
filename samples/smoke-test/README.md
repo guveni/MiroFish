@@ -30,9 +30,10 @@ Expect `{"status": "ok", "service": "MiroFish Backend"}`.
 2. Open **`http://localhost:3000`** (Vite may auto-open a browser tab).
 3. Upload **`seed-micro-town.txt`** (`samples/smoke-test/seed-micro-town.txt`).
 4. In the prediction / simulation-requirement box, paste the paragraph from **`simulation-requirement.txt`** (everything after the first line, or paste the whole file).
-5. Proceed through ontology → graph build → simulation steps as prompted.
+5. Open the **Run Configuration** panel and enable **Run unattended through report (Autopilot)**.
+6. Click **Start Engine**.
 
-**Expect:** ontology JSON, a graph build phase, then a simulation run. First-time LLM + graph ingestion can take several minutes depending on quotas and region.
+**Expect:** ontology JSON, a graph build phase, simulation env setup, parallel simulation, and report generation proceeding automatically. First-time LLM + graph ingestion can take several minutes depending on quotas and region.
 
 ## 3) Optional: API-onlyontology step
 

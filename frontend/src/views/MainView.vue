@@ -87,12 +87,15 @@ import GraphPanel from '../components/GraphPanel.vue'
 import Step1GraphBuild from '../components/Step1GraphBuild.vue'
 import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
+import { createSimulation } from '../api/simulation'
 import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
+import { usePipelineAutopilot } from '../composables/usePipelineAutopilot'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 
 const route = useRoute()
 const router = useRouter()
 const { t, tm } = useI18n()
+const { options: runOptions, shouldAdvance, markAdvanced } = usePipelineAutopilot()
 
 // Layout State
 const viewMode = ref('split') // graph | split | workbench
@@ -503,6 +506,26 @@ const pollTaskStatus = async (taskId) => {
       if (projRes.success && projRes.data.graph_id) {
           projectData.value = projRes.data
           await loadGraph(projRes.data.graph_id)
+          
+          if (shouldAdvance('createSimulation')) {
+            addLog('Autopilot: Advancing to Environment Setup...')
+            markAdvanced('createSimulation')
+            try {
+              const res = await createSimulation({
+                project_id: projectData.value.project_id,
+                graph_id: projectData.value.graph_id,
+                enable_twitter: runOptions.enableTwitter,
+                enable_reddit: runOptions.enableReddit
+              })
+              if (res.success && res.data?.simulation_id) {
+                router.push({ name: 'Simulation', params: { simulationId: res.data.simulation_id } })
+              } else {
+                addLog(`Autopilot create simulation failed: ${res.error || 'Unknown error'}`, 'error')
+              }
+            } catch (err) {
+              addLog(`Autopilot create simulation exception: ${err.message}`, 'error')
+            }
+          }
       }
     } else if (task.status === 'failed') {
       stopPolling()

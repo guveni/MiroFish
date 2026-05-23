@@ -757,6 +757,97 @@ def get_prepare_status():
         }), 500
 
 
+@simulation_bp.route('/<simulation_id>', methods=['DELETE'])
+def delete_simulation(simulation_id: str):
+    """
+    Delete a simulation and its associated data.
+    
+    If 'delete_project=true' is in the query params, it will also attempt to delete 
+    the parent project and knowledge graph. Otherwise, it only deletes the simulation data.
+    """
+    try:
+        manager = SimulationManager()
+        state = manager.get_simulation(simulation_id)
+        if not state:
+            return jsonify({
+                "success": False,
+                "error": t('api.simulationNotFound', id=simulation_id)
+            }), 404
+            
+        delete_project = request.args.get('delete_project', 'false').lower() == 'true'
+        
+        # Stop simulation if it's running
+        if state.status == 'running':
+            try:
+                runner = manager.get_runner(simulation_id)
+                runner.stop()
+            except Exception as e:
+                logger.warning(f"Failed to stop simulation before deletion: {e}")
+                
+        # Delete simulation directory
+        sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
+        if os.path.exists(sim_dir):
+            try:
+                import shutil
+                shutil.rmtree(sim_dir)
+            except Exception as e:
+                logger.warning(f"Failed to delete simulation directory {sim_dir}: {e}")
+                
+        # Remove from state dict and file
+        with manager._lock:
+            if simulation_id in manager.simulations:
+                del manager.simulations[simulation_id]
+                manager._save_state()
+                
+        # Delete run checkpoints if any
+        try:
+            from ..services.run_checkpoint_store import delete_simulation_checkpoints
+            delete_simulation_checkpoints(simulation_id)
+        except Exception as e:
+            logger.warning(f"Failed to delete simulation checkpoints: {e}")
+                
+        # If requested, also delete the project and graph
+        project_deleted = False
+        graph_deleted = False
+        if delete_project and state.project_id:
+            try:
+                from ..services.project_manager import ProjectManager
+                project = ProjectManager.get_project(state.project_id)
+                
+                if project:
+                    # Try to delete graph first
+                    if project.graph_id:
+                        try:
+                            from .graph import _get_graph_backend
+                            backend = _get_graph_backend()
+                            backend.delete_graph(project.graph_id)
+                            graph_deleted = True
+                        except Exception as e:
+                            logger.warning(f"Failed to delete graph {project.graph_id}: {e}")
+                            
+                    # Then delete project
+                    if ProjectManager.delete_project(state.project_id):
+                        project_deleted = True
+            except Exception as e:
+                logger.warning(f"Failed to delete project {state.project_id}: {e}")
+                
+        return jsonify({
+            "success": True,
+            "data": {
+                "simulation_deleted": True,
+                "project_deleted": project_deleted,
+                "graph_deleted": graph_deleted
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to delete simulation: {str(e)}")
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
 @simulation_bp.route('/<simulation_id>', methods=['GET'])
 def get_simulation(simulation_id: str):
     """Get simulation status."""

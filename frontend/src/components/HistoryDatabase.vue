@@ -32,7 +32,10 @@
         <!-- 卡片头部：simulation_id 和 功能可用状态 -->
         <div class="card-header">
           <span class="card-id">{{ formatSimulationId(project.simulation_id) }}</span>
-          <div class="card-status-icons">
+          <div class="card-status-icons" style="display: flex; align-items: center; gap: 8px;">
+            <button class="delete-btn" @click.stop="confirmDelete(project)" title="Delete simulation" style="background: none; border: none; cursor: pointer; padding: 0 4px; color: #94A3B8; font-size: 14px; opacity: 0; transition: opacity 0.2s;">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+            </button>
             <span 
               class="status-icon" 
               :class="{ available: project.project_id, unavailable: !project.project_id }"
@@ -151,7 +154,7 @@
             </div>
 
             <!-- 导航按钮 -->
-            <div class="modal-actions">
+            <div class="modal-actions" style="display: flex; gap: 12px; margin-bottom: 24px; position: relative;">
               <button 
                 class="modal-btn btn-project" 
                 @click="goToProject"
@@ -178,10 +181,53 @@
                 <span class="btn-icon">◆</span>
                 <span class="btn-text">{{ $t('history.step4Button') }}</span>
               </button>
+              
+              <button class="delete-btn-modal" @click="confirmDelete(selectedProject)" title="Delete simulation">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+              </button>
             </div>
             <!-- 不可回放提示 -->
             <div class="modal-playback-hint">
               <span class="hint-text">{{ $t('history.replayHint') }}</span>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+    <Teleport to="body">
+      <Transition name="modal">
+        <div v-if="projectToDelete" class="modal-overlay" style="z-index: 10001;" @click.self="cancelDelete">
+          <div class="modal-content" style="max-width: 450px; border-top: 4px solid #EF4444;">
+            <div class="modal-header" style="border-bottom: none; padding-bottom: 0;">
+              <h3 style="margin: 0; font-size: 1.25rem; font-weight: 600; color: #1E293B; display: flex; align-items: center; gap: 8px;">
+                <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#EF4444" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                Delete Simulation?
+              </h3>
+            </div>
+            <div class="modal-body" style="padding-top: 16px;">
+              <p style="margin: 0 0 16px 0; color: #475569; font-size: 0.95rem; line-height: 1.5;">
+                Are you sure you want to delete simulation <strong style="color: #0F172A;">{{ formatSimulationId(projectToDelete.simulation_id) }}</strong>?
+              </p>
+              <p style="margin: 0; color: #EF4444; font-size: 0.85rem; padding: 12px; background: #FEF2F2; border-radius: 6px;">
+                This will permanently delete the simulation, its associated knowledge graph, reports, and all uploaded files. This action cannot be undone.
+              </p>
+            </div>
+            <div class="modal-actions" style="margin-top: 24px; display: flex; justify-content: flex-end; gap: 12px;">
+              <button 
+                @click="cancelDelete" 
+                :disabled="isDeleting"
+                style="padding: 8px 16px; border-radius: 6px; border: 1px solid #E2E8F0; background: #FFFFFF; color: #64748B; font-weight: 500; cursor: pointer; transition: all 0.2s;"
+              >
+                Cancel
+              </button>
+              <button 
+                @click="executeDelete" 
+                :disabled="isDeleting"
+                style="padding: 8px 16px; border-radius: 6px; border: none; background: #EF4444; color: #FFFFFF; font-weight: 500; cursor: pointer; display: flex; align-items: center; gap: 6px; transition: all 0.2s;"
+              >
+                <span v-if="isDeleting" class="loading-spinner" style="width: 14px; height: 14px; border-width: 2px;"></span>
+                {{ isDeleting ? 'Deleting...' : 'Yes, Delete Everything' }}
+              </button>
             </div>
           </div>
         </div>
@@ -194,7 +240,7 @@
 import { ref, computed, onMounted, onUnmounted, onActivated, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { getSimulationHistory } from '../api/simulation'
+import { getSimulationHistory, deleteSimulation } from '../api/simulation'
 
 const router = useRouter()
 const route = useRoute()
@@ -207,6 +253,51 @@ const isExpanded = ref(false)
 const hoveringCard = ref(null)
 const historyContainer = ref(null)
 const selectedProject = ref(null)  // 当前选中的项目（用于弹窗）
+
+// ----------------- Deletion state -----------------
+const projectToDelete = ref(null)
+const isDeleting = ref(false)
+
+const confirmDelete = (project) => {
+  projectToDelete.value = project
+}
+
+const cancelDelete = () => {
+  if (isDeleting.value) return
+  projectToDelete.value = null
+}
+
+const executeDelete = async () => {
+  if (!projectToDelete.value || isDeleting.value) return
+  
+  const simId = projectToDelete.value.simulation_id
+  isDeleting.value = true
+  
+  try {
+    const res = await deleteSimulation(simId, true)
+    
+    if (res.success) {
+      // Remove from local list
+      projects.value = projects.value.filter(p => p.simulation_id !== simId)
+      
+      // If we deleted the currently selected project in the modal, close the modal
+      if (selectedProject.value && selectedProject.value.simulation_id === simId) {
+        selectedProject.value = null
+      }
+    } else {
+      console.error('Delete failed:', res.error)
+      alert(`Failed to delete: ${res.error}`)
+    }
+  } catch (err) {
+    console.error('Delete exception:', err)
+    alert(`Error deleting simulation: ${err.message}`)
+  } finally {
+    isDeleting.value = false
+    projectToDelete.value = null
+  }
+}
+// ------------------------------------------------
+
 let observer = null
 let isAnimating = false  // 动画锁，防止闪烁
 let expandDebounceTimer = null  // 防抖定时器
@@ -1339,4 +1430,36 @@ onUnmounted(() => {
   text-align: center;
   line-height: 1.5;
 }
+.delete-btn:hover {
+  opacity: 1 !important;
+  color: #EF4444 !important;
+}
+
+.delete-btn-modal {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #94A3B8;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.delete-btn-modal:hover {
+  background: #FEF2F2;
+  color: #EF4444;
+}
+
+.card-header:hover .delete-btn {
+  opacity: 1 !important;
+}
+
+/* Base modal transitions reuse existing logic but these button classes support it */
 </style>

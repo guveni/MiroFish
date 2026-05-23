@@ -165,15 +165,6 @@
                   </div>
                 </div>
               </div>
-              <label class="vertex-search-option">
-                <input
-                  v-model="useVertexSearch"
-                  type="checkbox"
-                  :disabled="loading"
-                />
-                <span>{{ $t('home.vertexSearchToggle') }}</span>
-              </label>
-              <p class="vertex-search-hint">{{ $t('home.vertexSearchHint') }}</p>
             </div>
 
             <!-- 分割线 -->
@@ -195,6 +186,99 @@
                   :disabled="loading"
                 ></textarea>
                 <div class="model-badge">{{ $t('home.engineBadge') }}</div>
+              </div>
+            </div>
+
+            <!-- Run Configuration Area -->
+            <div class="console-section run-config-section">
+              <div class="console-header clickable" @click="toggleRunConfig" style="cursor: pointer; display: flex; justify-content: space-between;">
+                <span class="console-label">{{ $t('home.runConfig') }}</span>
+                <span class="collapse-icon" style="font-size: 0.8em; color: var(--gray-text);">{{ isRunConfigExpanded ? '▼' : '▶' }}</span>
+              </div>
+              <div v-show="isRunConfigExpanded" class="run-config-body" style="margin-top: 12px; display: flex; flex-direction: column; gap: 8px;">
+                <!-- Autopilot -->
+                <label class="vertex-search-option">
+                  <input v-model="runOptions.autopilot" type="checkbox" :disabled="loading" />
+                  <span style="font-weight: 500;">{{ $t('home.runUnattended') }}</span>
+                </label>
+                <p class="vertex-search-hint" style="margin-top: -4px;">{{ $t('home.runUnattendedHint') }}</p>
+
+                <label class="vertex-search-option">
+                  <input v-model="runOptions.useVertexSearch" type="checkbox" :disabled="loading" />
+                  <span>{{ $t('home.vertexSearchToggle') }}</span>
+                </label>
+                <p class="vertex-search-hint" style="margin-top: -4px;">{{ $t('home.vertexSearchHint') }}</p>
+
+                <!-- Rounds -->
+                <div class="config-row" style="display: flex; flex-direction: column; gap: 8px; margin-top: 4px;">
+                  <div style="display: flex; align-items: center; gap: 12px;">
+                    <span class="config-label" style="font-size: 13px; color: var(--gray-text);">{{ $t('home.maxRoundsLabel') }}:</span>
+                    <div class="config-radios" style="display: flex; gap: 16px; font-size: 13px; flex-wrap: wrap;">
+                      <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                        <input type="radio" v-model="roundsMode" value="auto" :disabled="loading" />
+                        {{ $t('home.maxRoundsAuto') }}
+                        <span v-if="roundsMode === 'auto'" class="rounds-default-badge">{{ $t('common.default') }}</span>
+                      </label>
+                      <label style="display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                        <input type="radio" v-model="roundsMode" value="custom" :disabled="loading" />
+                        {{ $t('home.maxRoundsCustom') }}
+                        <span v-if="roundsMode === 'custom'" class="mono-num" style="font-family: var(--font-mono); font-weight: 600; min-width: 24px;">{{ runOptions.maxRounds }}</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <p v-if="roundsMode === 'auto'" class="vertex-search-hint rounds-auto-hint">{{ $t('home.maxRoundsAutoHint') }}</p>
+
+                  <div v-else class="range-wrapper" style="padding: 0 12px 8px 12px; max-width: 400px;">
+                    <input 
+                      type="range" 
+                      v-model.number="runOptions.maxRounds" 
+                      min="5" 
+                      max="100"
+                      step="5"
+                      class="minimal-slider"
+                      :disabled="loading"
+                      :style="{ '--percent': ((runOptions.maxRounds - 5) / (100 - 5)) * 100 + '%' }"
+                    />
+                    <div class="range-marks" style="display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 10px; color: #94A3B8; margin-top: 6px;">
+                      <span>5</span>
+                      <span 
+                        class="mark-recommend" 
+                        :class="{ active: runOptions.maxRounds === 40 }"
+                        @click="runOptions.maxRounds = 40"
+                        :style="{ position: 'absolute', left: `calc(${(40 - 5) / (100 - 5) * 100}% - 10px)`, cursor: 'pointer' }"
+                      >40</span>
+                      <span>100</span>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Platforms -->
+                <label class="vertex-search-option">
+                  <input v-model="runOptions.enableTwitter" type="checkbox" :disabled="loading" />
+                  <span>{{ $t('home.enableInfoPlaza') }}</span>
+                </label>
+                <label class="vertex-search-option">
+                  <input v-model="runOptions.enableReddit" type="checkbox" :disabled="loading" />
+                  <span>{{ $t('home.enableTopicCommunity') }}</span>
+                </label>
+                
+                <!-- Graph memory -->
+                <label class="vertex-search-option">
+                  <input v-model="runOptions.enableGraphMemoryUpdate" type="checkbox" :disabled="loading" />
+                  <span>{{ $t('home.enableGraphMemory') }}</span>
+                </label>
+
+                <!-- Profiles -->
+                <label class="vertex-search-option">
+                  <input v-model="runOptions.useLlmForProfiles" type="checkbox" :disabled="loading" />
+                  <span>{{ $t('home.useLlmProfiles') }}</span>
+                </label>
+                
+                <div class="config-row" style="display: flex; align-items: center; gap: 8px; font-size: 13px;">
+                  <span class="config-label" style="color: var(--gray-text);">{{ $t('home.parallelProfiles') }}</span>
+                  <input type="number" v-model.number="runOptions.parallelProfileCount" :disabled="loading" min="1" max="64" class="small-num-input" style="width: 50px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 4px; font-family: var(--font-mono);" />
+                </div>
               </div>
             </div>
 
@@ -236,7 +320,25 @@ const formData = ref({
 
 // 文件列表
 const files = ref([])
-const useVertexSearch = ref(false)
+
+// 运行配置
+const runOptions = ref({
+  autopilot: true,
+  maxRounds: 40,
+  useVertexSearch: true,
+  enableTwitter: true,
+  enableReddit: true,
+  enableGraphMemoryUpdate: true,
+  useLlmForProfiles: true,
+  parallelProfileCount: 20
+})
+
+const roundsMode = ref('auto') // 'auto' | 'custom'
+const isRunConfigExpanded = ref(runOptions.value.autopilot)
+
+const toggleRunConfig = () => {
+  isRunConfigExpanded.value = !isRunConfigExpanded.value
+}
 
 // 状态
 const loading = ref(false)
@@ -249,8 +351,9 @@ const fileInput = ref(null)
 // 计算属性:是否可以提交
 const canSubmit = computed(() => {
   const hasPrompt = formData.value.simulationRequirement.trim() !== ''
-  const hasSeed = files.value.length > 0 || useVertexSearch.value
-  return hasPrompt && hasSeed
+  const hasSeed = files.value.length > 0 || runOptions.value.useVertexSearch
+  const hasPlatform = runOptions.value.enableTwitter || runOptions.value.enableReddit
+  return hasPrompt && hasSeed && hasPlatform
 })
 
 // 触发文件选择
@@ -307,12 +410,19 @@ const scrollToBottom = () => {
   })
 }
 
+const getFinalRunOptions = () => {
+  return {
+    ...runOptions.value,
+    maxRounds: roundsMode.value === 'auto' ? null : runOptions.value.maxRounds
+  }
+}
+
 // 开始模拟 - 立即跳转，API调用在Process页面进行
 const startSimulation = () => {
   if (!canSubmit.value || loading.value) return
 
   // 存储待上传的数据
-  setPendingUpload(files.value, formData.value.simulationRequirement, useVertexSearch.value)
+  setPendingUpload(files.value, formData.value.simulationRequirement, false, getFinalRunOptions())
 
   // 立即跳转到Process页面（使用特殊标识表示新建项目）
   router.push({
@@ -746,6 +856,25 @@ const startSimulation = () => {
   line-height: 1.4;
 }
 
+.rounds-auto-hint {
+  margin: 0;
+  padding: 0 2px;
+  max-width: 520px;
+}
+
+.rounds-default-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-left: 2px;
+}
+
 .upload-placeholder {
   text-align: center;
 }
@@ -980,5 +1109,53 @@ html[lang="en"] .workflow-list .step-desc {
 
 html[lang="en"] .workflow-list {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.config-label {
+  min-width: 120px;
+}
+
+.minimal-slider {
+  -webkit-appearance: none;
+  width: 100%;
+  height: 4px;
+  background: #E2E8F0;
+  border-radius: 2px;
+  outline: none;
+  background-image: linear-gradient(#000, #000);
+  background-size: var(--percent, 0%) 100%;
+  background-repeat: no-repeat;
+  cursor: pointer;
+}
+
+.minimal-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #FFF;
+  border: 2px solid #000;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+  transition: transform 0.1s;
+  margin-top: -6px; /* Center thumb */
+}
+
+.minimal-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+.minimal-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+}
+
+.mark-recommend:hover {
+  color: #000;
+}
+
+.mark-recommend.active {
+  color: #000;
+  font-weight: 600;
 }
 </style>

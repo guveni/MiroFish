@@ -641,8 +641,10 @@ import {
   getSimulationConfig,
   getSimulationConfigRealtime
 } from '../api/simulation'
+import { usePipelineAutopilot } from '../composables/usePipelineAutopilot'
 
 const { t } = useI18n()
+const { options: runOptions, shouldAdvance, markAdvanced } = usePipelineAutopilot()
 
 const props = defineProps({
   simulationId: String,  // 从父组件传入
@@ -672,8 +674,8 @@ let lastLoggedProfileCount = 0
 let lastLoggedConfigStage = ''
 
 // 模拟轮数配置
-const useCustomRounds = ref(false) // 默认使用自动配置轮数
-const customMaxRounds = ref(40)   // 默认推荐40轮
+const useCustomRounds = ref(runOptions.maxRounds != null) // 默认使用自动配置轮数，或预设值
+const customMaxRounds = ref(runOptions.maxRounds != null ? runOptions.maxRounds : 40)   // 默认推荐40轮
 
 // Watch stage to update phase
 watch(currentStage, (newStage) => {
@@ -745,7 +747,10 @@ const handleStartSimulation = () => {
   // 构建传递给父组件的参数
   const params = {}
   
-  if (useCustomRounds.value) {
+  if (runOptions.maxRounds != null) {
+    params.maxRounds = runOptions.maxRounds
+    addLog(t('log.startSimCustomRounds', { rounds: runOptions.maxRounds }))
+  } else if (useCustomRounds.value) {
     // 用户自定义轮数，传递 max_rounds 参数
     params.maxRounds = customMaxRounds.value
     addLog(t('log.startSimCustomRounds', { rounds: customMaxRounds.value }))
@@ -756,6 +761,15 @@ const handleStartSimulation = () => {
   
   emit('next-step', params)
 }
+
+// 自动检测 phase === 4 并且如果是 autopilot 就前进
+watch(phase, (newPhase) => {
+  if (newPhase === 4 && shouldAdvance('startSimulation')) {
+    addLog('Autopilot: Advancing to start dual simulation...')
+    markAdvanced('startSimulation')
+    handleStartSimulation()
+  }
+})
 
 const truncateBio = (bio) => {
   if (bio.length > 80) {
@@ -785,8 +799,8 @@ const startPrepareSimulation = async () => {
   try {
     const res = await prepareSimulation({
       simulation_id: props.simulationId,
-      use_llm_for_profiles: true,
-      parallel_profile_count: 20
+      use_llm_for_profiles: runOptions.useLlmForProfiles,
+      parallel_profile_count: runOptions.parallelProfileCount
     })
     
     if (res.success && res.data) {

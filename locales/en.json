@@ -23,7 +23,8 @@
     "minutes": "minutes",
     "rounds": "rounds",
     "items": "items",
-    "files": "files"
+    "files": "files",
+    "default": "Default"
   },
   "meta": {
     "title": "MiroFish - Predict Everything",
@@ -68,6 +69,18 @@
     "simulationPrompt": ">_ 02 / Simulation Prompt",
     "promptPlaceholder": "// Describe your simulation or prediction requirement in natural language",
     "engineBadge": "Engine: MiroFish-V1.0",
+    "runConfig": "Run Configuration",
+    "runUnattended": "Run unattended through report (Autopilot)",
+    "runUnattendedHint": "Automatically advance through Steps 1-4 without pausing",
+    "maxRoundsLabel": "Simulation Rounds",
+    "maxRoundsAuto": "Auto (from simulation config)",
+    "maxRoundsAutoHint": "Default — rounds are computed from simulation time settings in Step 2 (total hours ÷ minutes per round). No round cap is applied until you choose \"Cap at\".",
+    "maxRoundsCustom": "Cap at",
+    "enableInfoPlaza": "Enable Platform: Info Plaza (Twitter)",
+    "enableTopicCommunity": "Enable Platform: Topic Community (Reddit)",
+    "enableGraphMemory": "Update graph memory during simulation",
+    "useLlmProfiles": "Use LLM for agent personas",
+    "parallelProfiles": "Parallel persona workers",
     "startEngine": "Start Engine",
     "initializing": "Initializing...",
     "vertexSearchToggle": "Augment seed context with Gemini web search (Google Search)",

@@ -296,8 +296,10 @@ import {
   getRunStatusDetail
 } from '../api/simulation'
 import { generateReport } from '../api/report'
+import { usePipelineAutopilot } from '../composables/usePipelineAutopilot'
 
 const { t } = useI18n()
+const { options: runOptions, shouldAdvance, markAdvanced } = usePipelineAutopilot()
 
 const props = defineProps({
   simulationId: String,
@@ -399,12 +401,12 @@ const doStartSimulation = async () => {
       simulation_id: props.simulationId,
       platform: 'parallel',
       force: true,  // 强制重新开始
-      enable_graph_memory_update: true  // 开启动态图谱更新
+      enable_graph_memory_update: runOptions.enableGraphMemoryUpdate  // 开启动态图谱更新
     }
     
-    if (props.maxRounds) {
-      params.max_rounds = props.maxRounds
-      addLog(t('log.setMaxRounds', { rounds: props.maxRounds }))
+    if (props.maxRounds || runOptions.maxRounds != null) {
+      params.max_rounds = props.maxRounds || runOptions.maxRounds
+      addLog(t('log.setMaxRounds', { rounds: params.max_rounds }))
     }
     
     addLog(t('log.graphMemoryUpdateEnabled'))
@@ -665,6 +667,7 @@ const handleNextStep = async () => {
       const reportId = res.data.report_id
       addLog(t('log.reportGenTaskStarted', { reportId }))
       
+      markAdvanced('generateReport')
       // 跳转到报告页面
       router.push({ name: 'Report', params: { reportId } })
     } else {
@@ -676,6 +679,14 @@ const handleNextStep = async () => {
     isGeneratingReport.value = false
   }
 }
+
+// 自动检测 phase === 2 并且如果是 autopilot 就前进
+watch(phase, (newPhase) => {
+  if (newPhase === 2 && shouldAdvance('generateReport')) {
+    addLog('Autopilot: Advancing to generate report...')
+    handleNextStep()
+  }
+})
 
 // Scroll log to bottom
 const logContent = ref(null)

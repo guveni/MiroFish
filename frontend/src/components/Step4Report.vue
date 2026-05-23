@@ -406,9 +406,11 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick, h, reactive } f
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { getAgentLog, getConsoleLog, generateReport } from '../api/report'
+import { usePipelineAutopilot } from '../composables/usePipelineAutopilot'
 
 const router = useRouter()
 const { t } = useI18n()
+const { options: runOptions } = usePipelineAutopilot()
 
 const props = defineProps({
   reportId: String,
@@ -2072,6 +2074,10 @@ const fetchAgentLog = async () => {
             currentSectionIndex.value = null  // 确保清除 loading 状态
             emit('update-status', 'completed')
             stopPolling()
+            
+            if (runOptions.autopilot) {
+              addLog('Autopilot: Pipeline complete.')
+            }
             // 滚动逻辑统一在循环结束后的 nextTick 中处理
           }
           

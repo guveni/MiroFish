@@ -256,9 +256,11 @@ import { computed, ref, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { createSimulation } from '../api/simulation'
+import { usePipelineAutopilot } from '../composables/usePipelineAutopilot'
 
 const router = useRouter()
 const { t } = useI18n()
+const { options: runOptions, markAdvanced } = usePipelineAutopilot()
 
 const props = defineProps({
   currentPhase: { type: Number, default: 0 },
@@ -289,10 +291,11 @@ const handleEnterEnvSetup = async () => {
     const res = await createSimulation({
       project_id: props.projectData.project_id,
       graph_id: props.projectData.graph_id,
-      enable_twitter: true,
-      enable_reddit: true
+      enable_twitter: runOptions.enableTwitter,
+      enable_reddit: runOptions.enableReddit
     })
     if (res.success && res.data?.simulation_id) {
+      markAdvanced('createSimulation')
       router.push({ name: 'Simulation', params: { simulationId: res.data.simulation_id } })
     } else {
       simulationError.value = res.error || t('common.unknownError')

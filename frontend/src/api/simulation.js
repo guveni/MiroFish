@@ -68,6 +68,17 @@ export const getSimulationConfigRealtime = (simulationId) => {
 }
 
 /**
+ * 删除模拟及相关数据
+ * @param {string} simulationId 
+ * @param {boolean} deleteProject 是否连带删除项目和图谱数据
+ */
+export const deleteSimulation = (simulationId, deleteProject = true) => {
+  return service.delete(`/api/simulation/${simulationId}`, {
+    params: { delete_project: deleteProject }
+  })
+}
+
+/**
  * 列出所有模拟
  * @param {string} projectId - 可选，按项目ID过滤
  */
