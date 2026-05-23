@@ -230,14 +230,15 @@
 
         <div class="process-content">
           <!-- Phase 1: ontology -->
-          <div class="process-phase" :class="{ 'active': currentPhase === 0, 'completed': currentPhase > 0 }">
+          <div class="process-phase" :class="{ 'active': currentPhase === 0, 'completed': currentPhase > 0, 'failed': ontologyError && currentPhase === 0 }">
             <div class="phase-header">
               <span class="phase-num">01</span>
               <div class="phase-info">
                 <div class="phase-title">Ontology generation</div>
                 <div class="phase-api">/api/graph/ontology/generate</div>
               </div>
-              <span class="phase-status" :class="getPhaseStatusClass(0)">
+              <span v-if="ontologyError && currentPhase === 0" class="phase-status failed">Failed</span>
+              <span v-else class="phase-status" :class="getPhaseStatusClass(0)">
                 {{ getPhaseStatusText(0) }}
               </span>
             </div>
@@ -332,21 +333,28 @@
               </div>
               
               <!-- Waiting -->
-              <div class="detail-section waiting-state" v-if="!projectData?.ontology && currentPhase === 0 && !ontologyProgress">
+              <div class="detail-section waiting-state" v-if="!projectData?.ontology && currentPhase === 0 && !ontologyProgress && !ontologyError">
                 <div class="waiting-hint">Waiting for ontology...</div>
+              </div>
+
+              <!-- Error + Retry -->
+              <div v-if="ontologyError && currentPhase === 0" class="phase-error-section">
+                <span class="phase-error-text">{{ ontologyError }}</span>
+                <button class="phase-retry-btn" @click="retryOntology">↺ Retry ontology</button>
               </div>
             </div>
           </div>
 
           <!-- Phase 2: graph build -->
-          <div class="process-phase" :class="{ 'active': currentPhase === 1, 'completed': currentPhase > 1 }">
+          <div class="process-phase" :class="{ 'active': currentPhase === 1, 'completed': currentPhase > 1, 'failed': buildError && currentPhase === 1 }">
             <div class="phase-header">
               <span class="phase-num">02</span>
               <div class="phase-info">
                 <div class="phase-title">Graph build</div>
                 <div class="phase-api">/api/graph/build</div>
               </div>
-              <span class="phase-status" :class="getPhaseStatusClass(1)">
+              <span v-if="buildError && currentPhase === 1" class="phase-status failed">Failed</span>
+              <span v-else class="phase-status" :class="getPhaseStatusClass(1)">
                 {{ getPhaseStatusText(1) }}
               </span>
             </div>
@@ -362,6 +370,12 @@
               <!-- Wait for ontology -->
               <div class="detail-section waiting-state" v-if="currentPhase < 1">
                 <div class="waiting-hint">Waiting for ontology to finish...</div>
+              </div>
+
+              <!-- Error + Retry -->
+              <div v-if="buildError && currentPhase === 1" class="phase-error-section">
+                <span class="phase-error-text">{{ buildError }}</span>
+                <button class="phase-retry-btn" @click="retryBuildGraph">↺ Retry build</button>
               </div>
               
               <!-- Build progress -->
@@ -473,6 +487,10 @@ const ontologyProgress = ref(null) // ontology step progress
 const currentPhase = ref(-1) // -1 uploading, 0 ontology, 1 graph build, 2 done
 const selectedItem = ref(null) // selected graph item
 const isFullScreen = ref(false)
+const ontologyError = ref('')
+const buildError = ref('')
+const simulationError = ref('')
+const creatingSimulation = ref(false)
 
 // DOM refs
 const graphContainer = ref(null)
@@ -482,6 +500,33 @@ const graphSvg = ref(null)
 let pollTimer = null
 let ontologyPollTimer = null
 let lastOntologyLogMessage = ''
+
+const applyBuildProgress = (progress, message) => {
+  const prev = buildProgress.value?.progress ?? 0
+  const next = Math.max(prev, Number(progress) || 0)
+  buildProgress.value = {
+    progress: next,
+    message: message || buildProgress.value?.message || 'Building graph...',
+  }
+}
+
+const refreshBuildProgressFromProject = async () => {
+  try {
+    const response = await getProject(currentProjectId.value)
+    if (!response.success) return
+    const p = response.data
+    if (p.status === 'graph_building' && (p.graph_build_progress || p.graph_build_message)) {
+      applyBuildProgress(p.graph_build_progress, p.graph_build_message)
+    }
+    if (p.graph_build_task_stale) {
+      console.warn(
+        '[build] Task missing on server (often after restart). Retry build to continue.',
+      )
+    }
+  } catch (err) {
+    console.warn('refreshBuildProgressFromProject:', err)
+  }
+}
 
 // computed
 const statusClass = computed(() => {
@@ -523,6 +568,46 @@ const goHome = () => {
 const goToNextStep = () => {
   // TODO: route to environment setup
   alert('Environment setup is not wired yet.')
+}
+
+const retryOntology = async () => {
+  if (!currentProjectId.value || currentProjectId.value === 'new') return
+  stopOntologyPolling()
+  ontologyError.value = ''
+  error.value = ''
+  currentPhase.value = 0
+  ontologyProgress.value = { message: 'Retrying ontology generation...', progress: 0 }
+  let lastOntologyLogMessageLocal = ''
+  const formData = new FormData()
+  formData.append('simulation_requirement', projectData.value?.simulation_requirement || '')
+  formData.append('project_id', currentProjectId.value)
+  try {
+    const response = await generateOntology(formData)
+    if (response.success && response.data?.task_id) {
+      startOntologyPolling(response.data.task_id)
+    } else if (response.success && response.data?.ontology) {
+      projectData.value = response.data
+      ontologyProgress.value = null
+      await startBuildGraph()
+    } else {
+      ontologyError.value = response.error || 'Ontology retry failed'
+      error.value = ontologyError.value
+      ontologyProgress.value = null
+    }
+  } catch (err) {
+    ontologyError.value = err.message || 'Ontology retry error'
+    error.value = ontologyError.value
+    ontologyProgress.value = null
+  }
+}
+
+const retryBuildGraph = async () => {
+  stopPolling()
+  stopGraphPolling()
+  buildError.value = ''
+  error.value = ''
+  buildProgress.value = null
+  await startBuildGraph()
 }
 
 const toggleFullScreen = () => {
@@ -681,6 +766,11 @@ const loadProject = async () => {
       // resume in-flight build polling
       if (response.data.status === 'graph_building' && response.data.graph_build_task_id) {
         currentPhase.value = 1
+        applyBuildProgress(response.data.graph_build_progress, response.data.graph_build_message)
+        if (response.data.graph_id) {
+          await loadGraph(response.data.graph_id)
+        }
+        startGraphPolling()
         startPollingTask(response.data.graph_build_task_id)
       }
       
@@ -750,12 +840,15 @@ const pollOntologyTask = async (taskId) => {
       stopOntologyPolling()
       projectData.value = task.result
       ontologyProgress.value = null
+      ontologyError.value = ''
       await startBuildGraph()
     } else if (task.status === 'failed') {
       stopOntologyPolling()
-      ontologyProgress.value = { message: task.error || task.message || 'Failed', progress: 0 }
-      error.value = task.error || task.message || 'Ontology generation failed'
-      console.error('[ontology] failed:', task.error || task.message)
+      ontologyProgress.value = null
+      const errMsg = task.error || task.message || 'Ontology generation failed'
+      ontologyError.value = errMsg
+      error.value = errMsg
+      console.error('[ontology] failed:', errMsg)
     }
   } catch (err) {
     console.error('[ontology] poll error:', err)
@@ -766,16 +859,12 @@ const pollOntologyTask = async (taskId) => {
 const startBuildGraph = async () => {
   try {
     currentPhase.value = 1
-    // optimistic progress banner
-    buildProgress.value = {
-      progress: 0,
-      message: 'Starting graph build...'
-    }
+    applyBuildProgress(0, 'Starting graph build...')
     
     const response = await buildGraph({ project_id: currentProjectId.value })
     
     if (response.success) {
-      buildProgress.value.message = 'Graph build job started.'
+      applyBuildProgress(buildProgress.value?.progress ?? 0, 'Graph build job started.')
       
       // task id → poll backend
       const taskId = response.data.task_id
@@ -874,36 +963,31 @@ const pollTaskStatus = async (taskId) => {
   try {
     const response = await getTaskStatus(taskId)
     
-    if (response.success) {
-      const task = response.data
-      
-      // HUD
-      buildProgress.value = {
-        progress: task.progress || 0,
-        message: task.message || 'Working...'
-      }
-      
-      console.log('Task status:', task.status, 'Progress:', task.progress)
-      
-      if (task.status === 'completed') {
+    if (!response.success) {
+      await refreshBuildProgressFromProject()
+      return
+    }
+
+    const task = response.data
+    
+    applyBuildProgress(task.progress, task.message || 'Working...')
+    
+    console.log('Task status:', task.status, 'Progress:', task.progress)
+    
+    if (task.status === 'completed') {
         console.log('Graph build finished; loading full payload...')
         
         stopPolling()
         stopGraphPolling()
         currentPhase.value = 2
+        buildError.value = ''
         
-        // completion HUD
-        buildProgress.value = {
-          progress: 100,
-          message: 'Build complete; loading graph...'
-        }
+        applyBuildProgress(100, 'Build complete; loading graph...')
         
-        // refresh project for graph id
         const projectResponse = await getProject(currentProjectId.value)
         if (projectResponse.success) {
           projectData.value = projectResponse.data
           
-          // final graph fetch
           if (projectResponse.data.graph_id) {
             console.log('Loading graph snapshot:', projectResponse.data.graph_id)
             await loadGraph(projectResponse.data.graph_id)
@@ -911,17 +995,18 @@ const pollTaskStatus = async (taskId) => {
           }
         }
         
-        // drop HUD
         buildProgress.value = null
-      } else if (task.status === 'failed') {
-        stopPolling()
-        stopGraphPolling()
-        error.value = 'Graph build failed: ' + (task.error || 'Unknown error')
-        buildProgress.value = null
-      }
+    } else if (task.status === 'failed') {
+      stopPolling()
+      stopGraphPolling()
+      const errMsg = task.error || task.message || 'Unknown error'
+      buildError.value = errMsg
+      error.value = 'Graph build failed: ' + errMsg
+      buildProgress.value = null
     }
   } catch (err) {
     console.error('Poll task error:', err)
+    await refreshBuildProgressFromProject()
   }
 }
 
@@ -2187,6 +2272,62 @@ onUnmounted(() => {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.75rem;
   color: #666;
+}
+
+/* Phase error + retry */
+.process-phase.failed {
+  border-color: #C62828;
+  opacity: 1;
+}
+
+.process-phase.failed .phase-header {
+  background: #FFF5F5;
+}
+
+.process-phase.failed .phase-num {
+  color: #C62828;
+}
+
+.phase-status.failed {
+  background: #FFEBEE;
+  color: #C62828;
+}
+
+.phase-error-section {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px;
+  background: #FFF5F5;
+  border: 1px solid #FFCDD2;
+  border-radius: 4px;
+  margin-top: 12px;
+}
+
+.phase-error-text {
+  flex: 1;
+  font-size: 0.82rem;
+  color: #C62828;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.phase-retry-btn {
+  flex-shrink: 0;
+  background: #000;
+  color: #FFF;
+  border: none;
+  padding: 8px 16px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+}
+
+.phase-retry-btn:hover {
+  opacity: 0.75;
 }
 
 /* responsive */

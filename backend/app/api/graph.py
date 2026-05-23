@@ -51,6 +51,19 @@ def _form_bool(value) -> bool:
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _persist_build_progress(project, progress: int, message: str) -> None:
+    """Mirror in-memory task progress onto the project for UI resume and restarts."""
+    project.graph_build_progress = max(int(project.graph_build_progress or 0), int(progress))
+    if message:
+        project.graph_build_message = message
+    ProjectManager.save_project(project)
+
+
+def _clear_build_progress(project) -> None:
+    project.graph_build_progress = 0
+    project.graph_build_message = ""
+
+
 # ============== Project Management ==============
 
 @graph_bp.route('/project/<project_id>', methods=['GET'])
@@ -66,9 +79,16 @@ def get_project(project_id: str):
             "error": t('api.projectNotFound', id=project_id)
         }), 404
 
+    data = project.to_dict()
+    if project.status == ProjectStatus.GRAPH_BUILDING and project.graph_build_task_id:
+        live_task = TaskManager().get_task(project.graph_build_task_id)
+        data["graph_build_task_stale"] = live_task is None
+    else:
+        data["graph_build_task_stale"] = False
+
     return jsonify({
         "success": True,
-        "data": project.to_dict()
+        "data": data
     })
 
 
@@ -127,6 +147,7 @@ def reset_project(project_id: str):
     
     project.graph_id = None
     project.graph_build_task_id = None
+    _clear_build_progress(project)
     project.ontology_task_id = None
     project.error = None
     ProjectManager.save_project(project)
@@ -156,6 +177,43 @@ def _ontology_result_payload(project, *, search_metadata=None, use_vertex_search
     return payload
 
 
+def _resume_ontology_from_checkpoint(project, payload: dict, *, task_id: str):
+    """Hydrate a project from an ontology_generated checkpoint."""
+    project.ontology = payload.get("ontology")
+    project.analysis_summary = payload.get("analysis_summary", "")
+    project.files = payload.get("files", project.files)
+    project.total_text_length = payload.get("total_text_length", project.total_text_length)
+    project.gemini_grounding_metadata = payload.get("gemini_grounding_metadata")
+    project.status = ProjectStatus.ONTOLOGY_GENERATED
+    project.ontology_task_id = None
+    project.error = None
+    ProjectManager.save_project(project)
+
+    use_vertex_search = bool(payload.get("use_vertex_search"))
+    search_metadata = payload.get("gemini_grounding_metadata")
+    result_payload = _ontology_result_payload(
+        project,
+        search_metadata=search_metadata,
+        use_vertex_search=use_vertex_search,
+    )
+    result_payload["resumed_from_checkpoint"] = True
+
+    entity_count = len((project.ontology or {}).get("entity_types", []))
+    edge_count = len((project.ontology or {}).get("edge_types", []))
+    TaskManager().update_task(
+        task_id,
+        status=TaskStatus.COMPLETED,
+        progress=100,
+        message=t(
+            'progress.ontologyComplete',
+            entities=entity_count,
+            edges=edge_count,
+        ),
+        result=result_payload,
+    )
+    return result_payload
+
+
 @graph_bp.route('/ontology/generate', methods=['POST'])
 def generate_ontology():
     """
@@ -165,13 +223,20 @@ def generate_ontology():
     On completion, task.result contains the same payload as the former synchronous response.
     """
     project = None
+    created_project = False
     try:
         logger.info("=== Starting ontology generation (async) ===")
 
         simulation_requirement = request.form.get('simulation_requirement', '')
-        project_name = request.form.get('project_name', 'Unnamed Project')
+        raw_project_name = request.form.get('project_name')
+        project_name = raw_project_name or 'Unnamed Project'
         additional_context = request.form.get('additional_context', '')
         use_vertex_search = _form_bool(request.form.get('use_vertex_search'))
+        requested_project_id = (
+            request.form.get('project_id')
+            or request.args.get('project_id')
+            or ''
+        ).strip()
 
         if not simulation_requirement:
             return jsonify({
@@ -198,11 +263,28 @@ def generate_ontology():
         uploaded_files = request.files.getlist('files') or []
         has_file_upload = any(f and f.filename for f in uploaded_files)
 
-        if not has_file_upload and not use_vertex_search:
+        checkpoint = None
+        if Config.RESUME_FROM_CHECKPOINT and requested_project_id:
+            checkpoint = load_project_stage_checkpoint(
+                requested_project_id,
+                "ontology_generated",
+            )
+
+        # Allow retry using stored files when an existing project_id is provided
+        if not has_file_upload and not use_vertex_search and not checkpoint and not requested_project_id:
             return jsonify({
                 "success": False,
                 "error": t('api.requireDocOrVertexSearch')
             }), 400
+
+        existing_project = None
+        if requested_project_id:
+            existing_project = ProjectManager.get_project(requested_project_id)
+            if not existing_project:
+                return jsonify({
+                    "success": False,
+                    "error": t('api.projectNotFound', id=requested_project_id)
+                }), 404
 
         task_manager = TaskManager()
         task_id = task_manager.create_task(
@@ -216,11 +298,32 @@ def generate_ontology():
             message=t('progress.ontologyValidating'),
         )
 
-        project = ProjectManager.create_project(name=project_name)
+        if requested_project_id:
+            project = existing_project
+            project.name = raw_project_name or project.name
+        else:
+            project = ProjectManager.create_project(name=project_name)
+            created_project = True
         project.simulation_requirement = simulation_requirement
         project.ontology_task_id = task_id
         ProjectManager.save_project(project)
         logger.info("Created project: %s (task_id=%s)", project.project_id, task_id)
+
+        if checkpoint:
+            _resume_ontology_from_checkpoint(
+                project,
+                checkpoint["payload"],
+                task_id=task_id,
+            )
+            return jsonify({
+                "success": True,
+                "data": {
+                    "project_id": project.project_id,
+                    "task_id": task_id,
+                    "message": t('api.ontologyTaskStarted', taskId=task_id),
+                    "resumed_from_checkpoint": True,
+                },
+            })
 
         saved_file_count = 0
         for file in uploaded_files:
@@ -472,7 +575,7 @@ def generate_ontology():
 
     except Exception as e:
         logger.exception("Ontology generation setup failed: %s", e)
-        if project:
+        if project and created_project:
             try:
                 ProjectManager.delete_project(project.project_id)
             except Exception:
@@ -562,6 +665,7 @@ def build_graph():
             project.status = ProjectStatus.ONTOLOGY_GENERATED
             project.graph_id = None
             project.graph_build_task_id = None
+            _clear_build_progress(project)
             project.error = None
         
         # Load configuration.
@@ -628,6 +732,7 @@ def build_graph():
         # Update project state.
         project.status = ProjectStatus.GRAPH_BUILDING
         project.graph_build_task_id = task_id
+        _clear_build_progress(project)
         ProjectManager.save_project(project)
         
         # Capture locale before spawning background thread
@@ -637,22 +742,35 @@ def build_graph():
         def build_task():
             set_locale(current_locale)
             build_logger = get_logger('mirofish.build')
+
+            def update_build_task(*, progress=None, message=None, **kwargs):
+                task_manager.update_task(
+                    task_id,
+                    progress=progress,
+                    message=message,
+                    **kwargs,
+                )
+                if progress is not None or message:
+                    _persist_build_progress(
+                        project,
+                        progress if progress is not None else int(project.graph_build_progress or 0),
+                        message or project.graph_build_message or "",
+                    )
+
             try:
                 build_logger.info("[%s] Starting graph build...", task_id)
-                task_manager.update_task(
-                    task_id, 
+                update_build_task(
                     status=TaskStatus.PROCESSING,
-                    message=t('progress.initGraphService')
+                    message=t('progress.initGraphService'),
                 )
                 
                 # Create graph build service.
                 builder = GraphBuilderService(api_key=Config.ZEP_API_KEY)
                 
                 # Split text into chunks.
-                task_manager.update_task(
-                    task_id,
+                update_build_task(
                     message=t('progress.textChunking'),
-                    progress=5
+                    progress=5,
                 )
                 chunks = TextProcessor.split_text(
                     text, 
@@ -662,10 +780,9 @@ def build_graph():
                 total_chunks = len(chunks)
                 
                 # Create graph.
-                task_manager.update_task(
-                    task_id,
+                update_build_task(
                     message=t('progress.creatingZepGraph'),
-                    progress=10
+                    progress=10,
                 )
                 graph_id = run_pipeline_step(
                     "zep_create_graph",
@@ -675,10 +792,9 @@ def build_graph():
                 project.graph_id = graph_id
                 ProjectManager.save_project(project)
 
-                task_manager.update_task(
-                    task_id,
+                update_build_task(
                     message=t('progress.settingOntology'),
-                    progress=15
+                    progress=15,
                 )
                 run_pipeline_step(
                     "zep_set_ontology",
@@ -688,39 +804,29 @@ def build_graph():
                 # Add text. progress_callback signature is (msg, progress_ratio).
                 def add_progress_callback(msg, progress_ratio):
                     progress = 15 + int(progress_ratio * 40)  # 15% - 55%
-                    task_manager.update_task(
-                        task_id,
-                        message=msg,
-                        progress=progress
-                    )
+                    update_build_task(message=msg, progress=progress)
                 
-                task_manager.update_task(
-                    task_id,
+                update_build_task(
                     message=t('progress.addingChunks', count=total_chunks),
-                    progress=15
+                    progress=15,
                 )
                 
                 episode_uuids = builder.add_text_batches(
                     graph_id,
                     chunks,
-                    batch_size=3,
+                    batch_size=Config.GRAPHITI_BATCH_SIZE,
                     progress_callback=add_progress_callback,
                 )
                 
                 # Wait for Zep processing by checking each episode's processed state.
-                task_manager.update_task(
-                    task_id,
+                update_build_task(
                     message=t('progress.waitingZepProcess'),
-                    progress=55
+                    progress=55,
                 )
                 
                 def wait_progress_callback(msg, progress_ratio):
                     progress = 55 + int(progress_ratio * 35)  # 55% - 90%
-                    task_manager.update_task(
-                        task_id,
-                        message=msg,
-                        progress=progress
-                    )
+                    update_build_task(message=msg, progress=progress)
                 
                 run_pipeline_step(
                     "zep_wait_for_episodes",
@@ -731,10 +837,9 @@ def build_graph():
                 )
                 
                 # Fetch graph data.
-                task_manager.update_task(
-                    task_id,
+                update_build_task(
                     message=t('progress.fetchingGraphData'),
-                    progress=95
+                    progress=95,
                 )
                 graph_data = run_pipeline_step(
                     "zep_get_graph_data",
@@ -743,6 +848,12 @@ def build_graph():
                 
                 # Update project state.
                 project.status = ProjectStatus.GRAPH_COMPLETED
+                project.graph_build_task_id = None
+                _persist_build_progress(
+                    project,
+                    100,
+                    t('progress.graphBuildComplete'),
+                )
                 ProjectManager.save_project(project)
                 
                 node_count = graph_data.get("node_count", 0)
@@ -756,8 +867,7 @@ def build_graph():
                 )
                 
                 # Complete task.
-                task_manager.update_task(
-                    task_id,
+                update_build_task(
                     status=TaskStatus.COMPLETED,
                     message=t('progress.graphBuildComplete'),
                     progress=100,
@@ -791,14 +901,19 @@ def build_graph():
                 build_logger.debug(traceback.format_exc())
                 
                 project.status = ProjectStatus.FAILED
+                project.graph_build_task_id = None
                 project.error = str(e)
+                _persist_build_progress(
+                    project,
+                    int(project.graph_build_progress or 0),
+                    t('progress.buildFailed', error=str(e)),
+                )
                 ProjectManager.save_project(project)
                 
-                task_manager.update_task(
-                    task_id,
+                update_build_task(
                     status=TaskStatus.FAILED,
                     message=t('progress.buildFailed', error=str(e)),
-                    error=traceback.format_exc()
+                    error=traceback.format_exc(),
                 )
                 try:
                     checkpoint_project_stage(

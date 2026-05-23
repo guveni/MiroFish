@@ -424,6 +424,7 @@
     "textSplit": "Text split into {count} chunks",
     "fetchingGraphInfo": "Fetching graph info...",
     "sendingBatch": "Sending batch {current}/{total} ({chunks} chunks)...",
+    "processingBatch": "Processing batch {current}/{total}...",
     "batchFailed": "Batch {batch} failed: {error}",
     "noEpisodesWait": "No episodes to wait for",
     "waitingEpisodes": "Waiting for {count} text chunks to process...",

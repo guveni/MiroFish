@@ -1,13 +1,31 @@
 """Graphiti-backed graph build service."""
 
+import threading
 import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
+from ..config import Config
 from .graph_builder import GraphBuilderService, GraphInfo
 from ..utils import graphiti_client
 from ..utils.graph_paging import fetch_all_edges, fetch_all_nodes
 from ..utils.locale import t
+from ..utils.pipeline_retry import run_pipeline_step_async
+
+
+def _in_batch_progress_ratio(
+    batch_start: float,
+    batch_end: float,
+    elapsed_s: float,
+    expected_s: float,
+) -> float:
+    """Interpolate chunk progress while a long-running Graphiti bulk call is in flight."""
+    if batch_end <= batch_start:
+        return batch_end
+    if expected_s <= 0:
+        return batch_end
+    fraction = min(0.95, elapsed_s / expected_s)
+    return batch_start + (batch_end - batch_start) * fraction
 
 
 class GraphitiGraphBuilderService(GraphBuilderService):
@@ -45,49 +63,118 @@ class GraphitiGraphBuilderService(GraphBuilderService):
         self,
         graph_id: str,
         chunks: List[str],
-        batch_size: int = 3,
+        batch_size: Optional[int] = None,
         progress_callback: Optional[Callable] = None,
     ) -> List[str]:
         total_chunks = len(chunks)
-        episode_uuids: List[str] = []
+        if not total_chunks:
+            return []
+
         ontology = graphiti_client.get_ontology(graph_id)
+        if batch_size is None:
+            batch_size = Config.GRAPHITI_BATCH_SIZE
+        batch_size = max(1, batch_size)
+        expected_batch_seconds = max(30, Config.GRAPHITI_BATCH_HEARTBEAT_SECONDS)
+        heartbeat_interval = 3
 
-        for i, chunk in enumerate(chunks, 1):
-            if progress_callback and total_chunks:
-                progress_callback(
-                    t(
-                        "progress.sendingBatch",
-                        current=(i + batch_size - 1) // batch_size,
-                        total=(total_chunks + batch_size - 1) // batch_size,
-                        chunks=1,
-                    ),
-                    i / total_chunks,
-                )
+        async def _add_all_episodes() -> List[str]:
+            from graphiti_core.nodes import EpisodeType
+            from graphiti_core.utils.bulk_utils import RawEpisode
 
-            async def _add_episode(index=i, body=chunk):
-                from graphiti_core.nodes import EpisodeType
+            episode_uuids: List[str] = []
+            reference_time = graphiti_client.utcnow()
+            total_batches = (total_chunks + batch_size - 1) // batch_size
 
-                return await graphiti_client.get_client().add_episode(
-                    name=f"chunk-{index}",
-                    episode_body=body,
-                    source=EpisodeType.text,
-                    source_description="MiroFish Graph",
-                    reference_time=graphiti_client.utcnow(),
-                    group_id=graph_id,
-                    entity_types=ontology.get("entity_types"),
-                    edge_types=ontology.get("edge_types"),
-                    edge_type_map=ontology.get("edge_type_map"),
-                )
+            for batch_index in range(0, total_chunks, batch_size):
+                batch_chunks = chunks[batch_index : batch_index + batch_size]
+                batch_num = batch_index // batch_size + 1
+                batch_start_ratio = batch_index / total_chunks
+                batch_end_ratio = min(1.0, (batch_index + len(batch_chunks)) / total_chunks)
 
-            result = graphiti_client.run_async(_add_episode())
-            episode = getattr(result, "episode", None)
-            episode_uuid = getattr(episode, "uuid", None)
-            if episode_uuid:
-                episode_uuids.append(episode_uuid)
-            if i % max(batch_size, 1) == 0:
-                time.sleep(0.2)
+                if progress_callback:
+                    progress_callback(
+                        t(
+                            "progress.sendingBatch",
+                            current=batch_num,
+                            total=total_batches,
+                            chunks=len(batch_chunks),
+                        ),
+                        batch_start_ratio,
+                    )
 
-        return episode_uuids
+                bulk_episodes = [
+                    RawEpisode(
+                        name=f"chunk-{batch_index + offset + 1}",
+                        content=chunk,
+                        source=EpisodeType.text,
+                        source_description="MiroFish Graph",
+                        reference_time=reference_time,
+                    )
+                    for offset, chunk in enumerate(batch_chunks)
+                ]
+
+                async def _add_batch(eps=bulk_episodes):
+                    return await graphiti_client.get_client().add_episode_bulk(
+                        bulk_episodes=eps,
+                        group_id=graph_id,
+                        entity_types=ontology.get("entity_types"),
+                        edge_types=ontology.get("edge_types"),
+                        edge_type_map=ontology.get("edge_type_map"),
+                    )
+
+                stop_heartbeat = threading.Event()
+                batch_started = time.monotonic()
+
+                def _heartbeat() -> None:
+                    while not stop_heartbeat.wait(heartbeat_interval):
+                        if not progress_callback:
+                            continue
+                        elapsed = time.monotonic() - batch_started
+                        ratio = _in_batch_progress_ratio(
+                            batch_start_ratio,
+                            batch_end_ratio,
+                            elapsed,
+                            expected_batch_seconds,
+                        )
+                        progress_callback(
+                            t(
+                                "progress.processingBatch",
+                                current=batch_num,
+                                total=total_batches,
+                            ),
+                            ratio,
+                        )
+
+                heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+                heartbeat_thread.start()
+                try:
+                    result = await run_pipeline_step_async(
+                        f"graphiti_add_episode_bulk_{batch_num}",
+                        _add_batch,
+                    )
+                finally:
+                    stop_heartbeat.set()
+                    heartbeat_thread.join(timeout=1)
+
+                for episode in getattr(result, "episodes", []) or []:
+                    episode_uuid = getattr(episode, "uuid", None)
+                    if episode_uuid:
+                        episode_uuids.append(str(episode_uuid))
+
+                if progress_callback:
+                    progress_callback(
+                        t(
+                            "progress.sendingBatch",
+                            current=batch_num,
+                            total=total_batches,
+                            chunks=len(batch_chunks),
+                        ),
+                        batch_end_ratio,
+                    )
+
+            return episode_uuids
+
+        return graphiti_client.run_async(_add_all_episodes())
 
     def _wait_for_episodes(
         self,
@@ -95,9 +182,12 @@ class GraphitiGraphBuilderService(GraphBuilderService):
         progress_callback: Optional[Callable] = None,
         timeout: int = 600,
     ):
+        """Graphiti processes episodes inline during bulk ingest; no Zep-style poll."""
+        del timeout
+        total = len(episode_uuids)
         if progress_callback:
             progress_callback(
-                t("progress.processingComplete", completed=len(episode_uuids), total=len(episode_uuids)),
+                t("progress.processingComplete", completed=total, total=total),
                 1.0,
             )
 

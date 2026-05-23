@@ -106,6 +106,16 @@ class Config:
     GRAPHITI_EMBEDDER = (os.environ.get('GRAPHITI_EMBEDDER') or 'auto').strip().lower()
     GRAPHITI_RERANKER = (os.environ.get('GRAPHITI_RERANKER') or 'auto').strip().lower()
     GRAPHITI_SEMAPHORE_LIMIT = int(os.environ.get('GRAPHITI_SEMAPHORE_LIMIT', '10'))
+    # Expected seconds per Graphiti bulk batch; used for in-batch progress heartbeat only.
+    GRAPHITI_BATCH_HEARTBEAT_SECONDS = int(os.environ.get('GRAPHITI_BATCH_HEARTBEAT_SECONDS', '90'))
+    GRAPHITI_BATCH_SIZE = int(os.environ.get('GRAPHITI_BATCH_SIZE', '10'))
+    GRAPHITI_LOCAL_EMBEDDING_MODEL = (
+        os.environ.get('GRAPHITI_LOCAL_EMBEDDING_MODEL') or 'BAAI/bge-large-en-v1.5'
+    )
+    GRAPHITI_GEMINI_EMBEDDING_MODEL = (
+        os.environ.get('GRAPHITI_GEMINI_EMBEDDING_MODEL') or 'gemini-embedding-001'
+    ).strip()
+    GRAPHITI_GEMINI_EMBEDDING_DIM = int(os.environ.get('GRAPHITI_GEMINI_EMBEDDING_DIM', '1024'))
 
     # Legacy Zep settings
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
@@ -122,6 +132,7 @@ class Config:
     # OASIS simulation settings
     OASIS_DEFAULT_MAX_ROUNDS = int(os.environ.get('OASIS_DEFAULT_MAX_ROUNDS', '10'))
     OASIS_SIMULATION_DATA_DIR = os.path.join(os.path.dirname(__file__), '../uploads/simulations')
+    SIM_CONFIG_MAX_WORKERS = int(os.environ.get('SIM_CONFIG_MAX_WORKERS', '8'))
     
     # OASIS platform actions
     OASIS_TWITTER_ACTIONS = [

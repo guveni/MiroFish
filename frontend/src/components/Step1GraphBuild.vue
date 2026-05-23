@@ -9,7 +9,8 @@
             <span class="step-title">{{ $t('step1.ontologyGeneration') }}</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase > 0" class="badge success">{{ $t('step1.ontologyCompleted') }}</span>
+            <span v-if="stepErrors?.ontology && currentPhase === 0" class="badge error">FAILED</span>
+            <span v-else-if="currentPhase > 0" class="badge success">{{ $t('step1.ontologyCompleted') }}</span>
             <span v-else-if="currentPhase === 0" class="badge processing">{{ $t('step1.ontologyGenerating') }}</span>
             <span v-else class="badge pending">{{ $t('step1.ontologyPending') }}</span>
           </div>
@@ -22,7 +23,7 @@
           </p>
 
           <!-- Loading / Progress -->
-          <div v-if="currentPhase === 0 && ontologyProgress" class="progress-section">
+          <div v-if="currentPhase === 0 && ontologyProgress && !stepErrors?.ontology" class="progress-section">
             <div class="spinner-sm"></div>
             <span>
               {{ ontologyProgress.message || $t('step1.analyzingDocs') }}
@@ -30,6 +31,12 @@
                 ({{ ontologyProgress.progress }}%)
               </template>
             </span>
+          </div>
+
+          <!-- Error + Retry -->
+          <div v-if="stepErrors?.ontology && currentPhase === 0" class="step-error-section">
+            <span class="error-text">{{ stepErrors.ontology }}</span>
+            <button class="retry-btn" @click="emit('retry-ontology')">↺ Retry</button>
           </div>
 
           <!-- Detail Overlay -->
@@ -156,7 +163,8 @@
             <span class="step-title">{{ $t('step1.graphRagBuild') }}</span>
           </div>
           <div class="step-status">
-            <span v-if="currentPhase > 1" class="badge success">{{ $t('step1.ontologyCompleted') }}</span>
+            <span v-if="stepErrors?.build && currentPhase === 1" class="badge error">FAILED</span>
+            <span v-else-if="currentPhase > 1" class="badge success">{{ $t('step1.ontologyCompleted') }}</span>
             <span v-else-if="currentPhase === 1" class="badge processing">{{ buildProgress?.progress || 0 }}%</span>
             <span v-else class="badge pending">{{ $t('step1.ontologyPending') }}</span>
           </div>
@@ -168,6 +176,12 @@
             {{ $t('step1.graphRagDesc') }}
           </p>
           
+          <!-- Error + Retry -->
+          <div v-if="stepErrors?.build && currentPhase === 1" class="step-error-section">
+            <span class="error-text">{{ stepErrors.build }}</span>
+            <button class="retry-btn" @click="emit('retry-build')">↺ Retry</button>
+          </div>
+
           <!-- Stats Cards -->
           <div class="stats-grid">
             <div class="stat-card">
@@ -201,13 +215,16 @@
         <div class="card-content">
           <p class="api-note">POST /api/simulation/create</p>
           <p class="description">{{ $t('step1.buildCompleteDesc') }}</p>
+          <div v-if="simulationError" class="step-error-section" style="margin-bottom: 12px">
+            <span class="error-text">{{ simulationError }}</span>
+          </div>
           <button 
             class="action-btn" 
             :disabled="currentPhase < 2 || creatingSimulation"
             @click="handleEnterEnvSetup"
           >
             <span v-if="creatingSimulation" class="spinner-sm"></span>
-            {{ creatingSimulation ? $t('step1.creating') : $t('step1.enterEnvSetup') + ' ➝' }}
+            {{ creatingSimulation ? $t('step1.creating') : (simulationError ? '↺ Retry' : $t('step1.enterEnvSetup') + ' ➝') }}
           </button>
         </div>
       </div>
@@ -249,28 +266,25 @@ const props = defineProps({
   ontologyProgress: Object,
   buildProgress: Object,
   graphData: Object,
-  systemLogs: { type: Array, default: () => [] }
+  systemLogs: { type: Array, default: () => [] },
+  stepErrors: { type: Object, default: () => ({}) }
 })
 
-defineEmits(['next-step'])
+const emit = defineEmits(['next-step', 'retry-ontology', 'retry-build'])
 
 const selectedOntologyItem = ref(null)
 const logContent = ref(null)
 const creatingSimulation = ref(false)
+const simulationError = ref('')
 
 const groundingMetadata = computed(() => (
   props.projectData?.gemini_grounding_metadata || props.projectData?.search_metadata || null
 ))
 
-// 进入环境搭建 - 创建 simulation 并跳转
 const handleEnterEnvSetup = async () => {
-  if (!props.projectData?.project_id || !props.projectData?.graph_id) {
-    console.error('缺少项目或图谱信息')
-    return
-  }
-  
+  if (!props.projectData?.project_id || !props.projectData?.graph_id) return
   creatingSimulation.value = true
-  
+  simulationError.value = ''
   try {
     const res = await createSimulation({
       project_id: props.projectData.project_id,
@@ -278,20 +292,13 @@ const handleEnterEnvSetup = async () => {
       enable_twitter: true,
       enable_reddit: true
     })
-    
     if (res.success && res.data?.simulation_id) {
-      // 跳转到 simulation 页面
-      router.push({
-        name: 'Simulation',
-        params: { simulationId: res.data.simulation_id }
-      })
+      router.push({ name: 'Simulation', params: { simulationId: res.data.simulation_id } })
     } else {
-      console.error('创建模拟失败:', res.error)
-      alert(t('step1.createSimulationFailed', { error: res.error || t('common.unknownError') }))
+      simulationError.value = res.error || t('common.unknownError')
     }
   } catch (err) {
-    console.error('创建模拟异常:', err)
-    alert(t('step1.createSimulationException', { error: err.message }))
+    simulationError.value = err.message
   } finally {
     creatingSimulation.value = false
   }
@@ -401,6 +408,7 @@ watch(() => props.systemLogs.length, () => {
 .badge.processing { background: #FF5722; color: #FFF; }
 .badge.accent { background: #FF5722; color: #FFF; }
 .badge.pending { background: #F5F5F5; color: #999; }
+.badge.error { background: #FFEBEE; color: #C62828; }
 
 .api-note {
   font-family: 'JetBrains Mono', monospace;
@@ -849,5 +857,43 @@ watch(() => props.systemLogs.length, () => {
 
 .log-line.log-error .log-time {
   color: #B34747;
+}
+
+/* Step error + retry */
+.step-error-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #FFF5F5;
+  border: 1px solid #FFCDD2;
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+
+.error-text {
+  flex: 1;
+  font-size: 11px;
+  color: #C62828;
+  font-family: 'JetBrains Mono', monospace;
+  word-break: break-word;
+}
+
+.retry-btn {
+  flex-shrink: 0;
+  background: #000;
+  color: #FFF;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.retry-btn:hover {
+  opacity: 0.75;
 }
 </style>

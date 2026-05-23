@@ -319,29 +319,50 @@ class SimulationConfigGenerator:
         # ========== Steps 3-N: generate Agent config batches in parallel ==========
         all_agent_configs_by_batch: List[List[AgentActivityConfig]] = [[] for _ in range(num_batches)]
         if num_batches:
-            max_workers = min(4, num_batches)
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_batch = {}
-                for batch_idx in range(num_batches):
-                    start_idx = batch_idx * self.AGENTS_PER_BATCH
-                    end_idx = min(start_idx + self.AGENTS_PER_BATCH, len(entities))
-                    batch_entities = entities[start_idx:end_idx]
-                    future = executor.submit(
-                        self._generate_agent_configs_batch,
-                        context,
-                        batch_entities,
-                        start_idx,
-                        simulation_requirement,
-                    )
-                    future_to_batch[future] = (batch_idx, start_idx, end_idx)
+            max_workers = min(max(1, Config.SIM_CONFIG_MAX_WORKERS), num_batches)
+            use_async_batches = True
+            try:
+                import asyncio
 
-                for future in as_completed(future_to_batch):
-                    batch_idx, start_idx, end_idx = future_to_batch[future]
-                    report_progress(
-                        3 + batch_idx,
-                        t('progress.generatingAgentConfig', start=start_idx + 1, end=end_idx, total=len(entities))
+                asyncio.get_running_loop()
+                use_async_batches = False
+            except RuntimeError:
+                pass
+
+            if use_async_batches:
+                all_agent_configs_by_batch = asyncio.run(
+                    self._generate_agent_config_batches_async(
+                        context,
+                        entities,
+                        simulation_requirement,
+                        num_batches,
+                        max_workers,
+                        report_progress,
                     )
-                    all_agent_configs_by_batch[batch_idx] = future.result()
+                )
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_batch = {}
+                    for batch_idx in range(num_batches):
+                        start_idx = batch_idx * self.AGENTS_PER_BATCH
+                        end_idx = min(start_idx + self.AGENTS_PER_BATCH, len(entities))
+                        batch_entities = entities[start_idx:end_idx]
+                        future = executor.submit(
+                            self._generate_agent_configs_batch,
+                            context,
+                            batch_entities,
+                            start_idx,
+                            simulation_requirement,
+                        )
+                        future_to_batch[future] = (batch_idx, start_idx, end_idx)
+
+                    for future in as_completed(future_to_batch):
+                        batch_idx, start_idx, end_idx = future_to_batch[future]
+                        report_progress(
+                            3 + batch_idx,
+                            t('progress.generatingAgentConfig', start=start_idx + 1, end=end_idx, total=len(entities))
+                        )
+                        all_agent_configs_by_batch[batch_idx] = future.result()
 
         all_agent_configs = [
             cfg
@@ -493,6 +514,41 @@ class SimulationConfigGenerator:
                 import time
                 time.sleep(2 * (attempt + 1))
         
+        raise last_error or Exception("LLM call failed")
+
+    async def _call_llm_with_retry_async(self, prompt: str, system_prompt: str) -> Dict[str, Any]:
+        """Async LLM call with the same JSON repair behavior."""
+        import asyncio
+
+        max_attempts = 3
+        last_error = None
+
+        for attempt in range(max_attempts):
+            try:
+                content = await self.llm_client.achat(
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.7 - (attempt * 0.1),
+                    max_tokens=Config.LLM_JSON_MAX_TOKENS,
+                )
+
+                try:
+                    return json.loads(content)
+                except json.JSONDecodeError as e:
+                    logger.warning("JSON parse failed (attempt %d): %s", attempt + 1, str(e)[:80])
+                    fixed = self._try_fix_config_json(content)
+                    if fixed:
+                        return fixed
+                    last_error = e
+
+            except Exception as e:
+                logger.warning("Async LLM call failed (attempt %d): %s", attempt + 1, str(e)[:80])
+                last_error = e
+                await asyncio.sleep(2 * (attempt + 1))
+
         raise last_error or Exception("LLM call failed")
     
     def _fix_truncated_json(self, content: str) -> str:
@@ -832,16 +888,13 @@ Return JSON only, no Markdown:
         event_config.initial_posts = updated_posts
         return event_config
     
-    def _generate_agent_configs_batch(
+    def _build_agent_config_batch_prompt(
         self,
-        context: str,
         entities: List[EntityNode],
         start_idx: int,
         simulation_requirement: str
-    ) -> List[AgentActivityConfig]:
-        """Generate one batch of Agent configuration."""
-        
-        # Build compact entity info.
+    ) -> tuple[str, str]:
+        """Build the prompt pair for one Agent configuration batch."""
         entity_list = []
         summary_len = self.AGENT_SUMMARY_LENGTH
         for i, e in enumerate(entities):
@@ -890,23 +943,23 @@ Return JSON only, no Markdown:
         system_prompt = "You are a social media behavior analysis expert. Return pure JSON. Configuration must fit the target audience's likely daily rhythm."
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}\nIMPORTANT: The 'stance' field value MUST be one of the English strings: 'supportive', 'opposing', 'neutral', 'observer'. All JSON field names and numeric values must remain unchanged. Only natural language text fields should use the specified language."
 
-        try:
-            result = self._call_llm_with_retry(prompt, system_prompt)
-            llm_configs = {cfg["agent_id"]: cfg for cfg in result.get("agent_configs", [])}
-        except Exception as e:
-            logger.warning("Agent config batch LLM generation failed: %s; using rules", e)
-            llm_configs = {}
-        
-        # Build AgentActivityConfig objects.
+        return prompt, system_prompt
+
+    def _agent_configs_from_llm_configs(
+        self,
+        entities: List[EntityNode],
+        start_idx: int,
+        llm_configs: Dict[int, Dict[str, Any]],
+    ) -> List[AgentActivityConfig]:
+        """Build AgentActivityConfig objects from LLM output with rule fallbacks."""
         configs = []
         for i, entity in enumerate(entities):
             agent_id = start_idx + i
             cfg = llm_configs.get(agent_id, {})
-            
-            # Use rule-based defaults when the LLM omitted an Agent.
+
             if not cfg:
                 cfg = self._generate_agent_config_by_rule(entity)
-            
+
             config = AgentActivityConfig(
                 agent_id=agent_id,
                 entity_uuid=entity.uuid,
@@ -923,8 +976,93 @@ Return JSON only, no Markdown:
                 influence_weight=cfg.get("influence_weight", 1.0)
             )
             configs.append(config)
-        
+
         return configs
+
+    def _generate_agent_configs_batch(
+        self,
+        context: str,
+        entities: List[EntityNode],
+        start_idx: int,
+        simulation_requirement: str
+    ) -> List[AgentActivityConfig]:
+        """Generate one batch of Agent configuration."""
+        prompt, system_prompt = self._build_agent_config_batch_prompt(
+            entities,
+            start_idx,
+            simulation_requirement,
+        )
+
+        try:
+            result = self._call_llm_with_retry(prompt, system_prompt)
+            llm_configs = {cfg["agent_id"]: cfg for cfg in result.get("agent_configs", [])}
+        except Exception as e:
+            logger.warning("Agent config batch LLM generation failed: %s; using rules", e)
+            llm_configs = {}
+
+        return self._agent_configs_from_llm_configs(entities, start_idx, llm_configs)
+
+    async def _generate_agent_configs_batch_async(
+        self,
+        context: str,
+        entities: List[EntityNode],
+        start_idx: int,
+        simulation_requirement: str
+    ) -> List[AgentActivityConfig]:
+        """Generate one Agent configuration batch with async LLM I/O."""
+        prompt, system_prompt = self._build_agent_config_batch_prompt(
+            entities,
+            start_idx,
+            simulation_requirement,
+        )
+
+        try:
+            result = await self._call_llm_with_retry_async(prompt, system_prompt)
+            llm_configs = {cfg["agent_id"]: cfg for cfg in result.get("agent_configs", [])}
+        except Exception as e:
+            logger.warning("Async Agent config batch LLM generation failed: %s; using rules", e)
+            llm_configs = {}
+
+        return self._agent_configs_from_llm_configs(entities, start_idx, llm_configs)
+
+    async def _generate_agent_config_batches_async(
+        self,
+        context: str,
+        entities: List[EntityNode],
+        simulation_requirement: str,
+        num_batches: int,
+        max_workers: int,
+        report_progress: Callable[[int, str], None],
+    ) -> List[List[AgentActivityConfig]]:
+        """Generate all Agent config batches with bounded async concurrency."""
+        import asyncio
+
+        semaphore = asyncio.Semaphore(max(1, max_workers))
+        all_agent_configs_by_batch: List[List[AgentActivityConfig]] = [[] for _ in range(num_batches)]
+
+        async def run_batch(batch_idx: int):
+            start_idx = batch_idx * self.AGENTS_PER_BATCH
+            end_idx = min(start_idx + self.AGENTS_PER_BATCH, len(entities))
+            batch_entities = entities[start_idx:end_idx]
+            async with semaphore:
+                configs = await self._generate_agent_configs_batch_async(
+                    context,
+                    batch_entities,
+                    start_idx,
+                    simulation_requirement,
+                )
+            return batch_idx, start_idx, end_idx, configs
+
+        tasks = [asyncio.create_task(run_batch(batch_idx)) for batch_idx in range(num_batches)]
+        for task in asyncio.as_completed(tasks):
+            batch_idx, start_idx, end_idx, configs = await task
+            report_progress(
+                3 + batch_idx,
+                t('progress.generatingAgentConfig', start=start_idx + 1, end=end_idx, total=len(entities))
+            )
+            all_agent_configs_by_batch[batch_idx] = configs
+
+        return all_agent_configs_by_batch
     
     def _generate_agent_config_by_rule(self, entity: EntityNode) -> Dict[str, Any]:
         """Generate one Agent configuration with rule-based defaults."""

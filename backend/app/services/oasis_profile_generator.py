@@ -265,6 +265,61 @@ class OasisProfileGenerator:
             source_entity_uuid=entity.uuid,
             source_entity_type=entity_type,
         )
+
+    async def generate_profile_from_entity_async(
+        self,
+        entity: EntityNode,
+        user_id: int,
+        use_llm: bool = True
+    ) -> OasisAgentProfile:
+        """
+        Generate an OASIS Agent Profile with async LLM I/O.
+
+        Graph context assembly can involve synchronous graph search, so it is
+        moved to a worker thread while independent LLM calls are awaited.
+        """
+        import asyncio
+
+        entity_type = entity.get_entity_type() or "Entity"
+        name = entity.name
+        user_name = self._generate_username(name)
+        context = await asyncio.to_thread(self._build_entity_context, entity)
+
+        if use_llm:
+            profile_data = await self._generate_profile_with_llm_async(
+                entity_name=name,
+                entity_type=entity_type,
+                entity_summary=entity.summary,
+                entity_attributes=entity.attributes,
+                context=context
+            )
+        else:
+            profile_data = self._generate_profile_rule_based(
+                entity_name=name,
+                entity_type=entity_type,
+                entity_summary=entity.summary,
+                entity_attributes=entity.attributes
+            )
+
+        return OasisAgentProfile(
+            user_id=user_id,
+            user_name=user_name,
+            name=name,
+            bio=profile_data.get("bio", f"{entity_type}: {name}"),
+            persona=profile_data.get("persona", entity.summary or f"A {entity_type} named {name}."),
+            karma=profile_data.get("karma", random.randint(500, 5000)),
+            friend_count=profile_data.get("friend_count", random.randint(50, 500)),
+            follower_count=profile_data.get("follower_count", random.randint(100, 1000)),
+            statuses_count=profile_data.get("statuses_count", random.randint(100, 2000)),
+            age=profile_data.get("age"),
+            gender=profile_data.get("gender"),
+            mbti=profile_data.get("mbti"),
+            country=profile_data.get("country"),
+            profession=profile_data.get("profession"),
+            interested_topics=profile_data.get("interested_topics", []),
+            source_entity_uuid=entity.uuid,
+            source_entity_type=entity_type,
+        )
     
     def _generate_username(self, name: str) -> str:
         """Generate a username."""
@@ -409,6 +464,20 @@ class OasisProfileGenerator:
             logger.warning("Zep search failed (%s): %s", entity_name, e)
         
         return results
+
+    def _has_sufficient_direct_context(self, entity: EntityNode) -> bool:
+        """Return True when fetched edges/nodes already provide enough facts."""
+        fact_count = sum(
+            1
+            for edge in (entity.related_edges or [])
+            if (edge.get("fact") or "").strip()
+        )
+        node_context_count = sum(
+            1
+            for node in (entity.related_nodes or [])
+            if (node.get("summary") or node.get("name") or "").strip()
+        )
+        return fact_count + node_context_count >= 3
     
     def _build_entity_context(self, entity: EntityNode) -> str:
         """
@@ -469,8 +538,12 @@ class OasisProfileGenerator:
             if related_info:
                 context_parts.append("### Related Entity Info\n" + "\n".join(related_info))
         
-        # Enrich with Zep search.
-        zep_results = self._search_zep_for_entity(entity)
+        # Enrich with graph search only when direct context is sparse.
+        zep_results = (
+            {"facts": [], "node_summaries": [], "context": ""}
+            if self._has_sufficient_direct_context(entity)
+            else self._search_zep_for_entity(entity)
+        )
         
         if zep_results.get("facts"):
             # Deduplicate facts already present in direct relationships.
@@ -490,6 +563,20 @@ class OasisProfileGenerator:
     def _is_group_entity(self, entity_type: str) -> bool:
         """Return whether this is a group/institution entity type."""
         return entity_type.lower() in self.GROUP_ENTITY_TYPES
+
+    def _normalize_profile_result(
+        self,
+        result: Dict[str, Any],
+        entity_name: str,
+        entity_type: str,
+        entity_summary: str,
+    ) -> Dict[str, Any]:
+        """Ensure required profile fields are present."""
+        if "bio" not in result or not result["bio"]:
+            result["bio"] = entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}"
+        if "persona" not in result or not result["persona"]:
+            result["persona"] = entity_summary or f"{entity_name} is a {entity_type}."
+        return result
     
     def _generate_profile_with_llm(
         self,
@@ -537,13 +624,9 @@ class OasisProfileGenerator:
                 try:
                     result = json.loads(content)
                     
-                    # Validate required fields.
-                    if "bio" not in result or not result["bio"]:
-                        result["bio"] = entity_summary[:200] if entity_summary else f"{entity_type}: {entity_name}"
-                    if "persona" not in result or not result["persona"]:
-                        result["persona"] = entity_summary or f"{entity_name} is a {entity_type}."
-                    
-                    return result
+                    return self._normalize_profile_result(
+                        result, entity_name, entity_type, entity_summary
+                    )
                     
                 except json.JSONDecodeError as je:
                     logger.warning("JSON parse failed (attempt %d): %s", attempt + 1, str(je)[:80])
@@ -564,6 +647,70 @@ class OasisProfileGenerator:
         
         logger.warning(
             "LLM persona generation failed after %d attempts: %s; using rule-based fallback",
+            max_attempts,
+            last_error,
+        )
+        return self._generate_profile_rule_based(
+            entity_name, entity_type, entity_summary, entity_attributes
+        )
+
+    async def _generate_profile_with_llm_async(
+        self,
+        entity_name: str,
+        entity_type: str,
+        entity_summary: str,
+        entity_attributes: Dict[str, Any],
+        context: str
+    ) -> Dict[str, Any]:
+        """Generate a detailed persona with async LLM I/O."""
+        import asyncio
+
+        is_individual = self._is_individual_entity(entity_type)
+
+        if is_individual:
+            prompt = self._build_individual_persona_prompt(
+                entity_name, entity_type, entity_summary, entity_attributes, context
+            )
+        else:
+            prompt = self._build_group_persona_prompt(
+                entity_name, entity_type, entity_summary, entity_attributes, context
+            )
+
+        max_attempts = 3
+        last_error = None
+
+        for attempt in range(max_attempts):
+            try:
+                content = await self.llm_client.achat(
+                    messages=[
+                        {"role": "system", "content": self._get_system_prompt(is_individual)},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format={"type": "json_object"},
+                    temperature=0.7 - (attempt * 0.1),
+                    max_tokens=Config.LLM_JSON_MAX_TOKENS,
+                )
+
+                try:
+                    result = json.loads(content)
+                    return self._normalize_profile_result(
+                        result, entity_name, entity_type, entity_summary
+                    )
+                except json.JSONDecodeError as je:
+                    logger.warning("JSON parse failed (attempt %d): %s", attempt + 1, str(je)[:80])
+                    result = self._try_fix_json(content, entity_name, entity_type, entity_summary)
+                    if result.get("_fixed"):
+                        del result["_fixed"]
+                        return result
+                    last_error = je
+
+            except Exception as e:
+                logger.warning("Async LLM call failed (attempt %d): %s", attempt + 1, str(e)[:80])
+                last_error = e
+                await asyncio.sleep(1 * (attempt + 1))
+
+        logger.warning(
+            "Async LLM persona generation failed after %d attempts: %s; using rule-based fallback",
             max_attempts,
             last_error,
         )
@@ -832,6 +979,113 @@ Important:
                 "profession": entity_type,
                 "interested_topics": ["General", "Social Issues"],
             }
+
+    async def _generate_profiles_from_entities_async(
+        self,
+        entities: List[EntityNode],
+        use_llm: bool,
+        progress_callback: Optional[callable],
+        parallel_count: int,
+        realtime_output_path: Optional[str],
+        output_platform: str,
+        current_locale: str,
+    ) -> List[OasisAgentProfile]:
+        """Generate profiles with bounded async LLM concurrency."""
+        import asyncio
+        from threading import Lock
+
+        total = len(entities)
+        profiles: List[Optional[OasisAgentProfile]] = [None] * total
+        completed_count = 0
+        lock = Lock()
+        semaphore = asyncio.Semaphore(max(1, parallel_count))
+
+        def save_profiles_realtime():
+            if not realtime_output_path:
+                return
+
+            with lock:
+                existing_profiles = [p for p in profiles if p is not None]
+                if not existing_profiles:
+                    return
+
+                try:
+                    if output_platform == "reddit":
+                        profiles_data = [p.to_reddit_format() for p in existing_profiles]
+                        with open(realtime_output_path, 'w', encoding='utf-8') as f:
+                            json.dump(profiles_data, f, ensure_ascii=False, indent=2)
+                    else:
+                        import csv
+                        profiles_data = [p.to_twitter_format() for p in existing_profiles]
+                        if profiles_data:
+                            fieldnames = list(profiles_data[0].keys())
+                            with open(realtime_output_path, 'w', encoding='utf-8', newline='') as f:
+                                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                                writer.writeheader()
+                                writer.writerows(profiles_data)
+                except Exception as e:
+                    logger.warning("Realtime profile save failed: %s", e)
+
+        async def generate_single_profile(idx: int, entity: EntityNode) -> tuple:
+            set_locale(current_locale)
+            entity_type = entity.get_entity_type() or "Entity"
+
+            try:
+                async with semaphore:
+                    profile = await self.generate_profile_from_entity_async(
+                        entity=entity,
+                        user_id=idx,
+                        use_llm=use_llm
+                    )
+
+                self._print_generated_profile(entity.name, entity_type, profile)
+                return idx, profile, None
+
+            except Exception as e:
+                logger.error("Failed to generate persona for entity %s: %s", entity.name, str(e))
+                fallback_profile = OasisAgentProfile(
+                    user_id=idx,
+                    user_name=self._generate_username(entity.name),
+                    name=entity.name,
+                    bio=f"{entity_type}: {entity.name}",
+                    persona=entity.summary or "A participant in social discussions.",
+                    source_entity_uuid=entity.uuid,
+                    source_entity_type=entity_type,
+                )
+                return idx, fallback_profile, str(e)
+
+        logger.info("Starting async Agent persona generation: total=%d, workers=%d", total, parallel_count)
+        print(f"\n{'='*60}")
+        print(f"Starting Agent persona generation - {total} entities, async workers: {parallel_count}")
+        print(f"{'='*60}\n")
+
+        tasks = [
+            asyncio.create_task(generate_single_profile(idx, entity))
+            for idx, entity in enumerate(entities)
+        ]
+
+        for task in asyncio.as_completed(tasks):
+            result_idx, profile, error = await task
+            entity = entities[result_idx]
+            entity_type = entity.get_entity_type() or "Entity"
+            profiles[result_idx] = profile
+            completed_count += 1
+
+            await asyncio.to_thread(save_profiles_realtime)
+
+            if progress_callback:
+                progress_callback(
+                    completed_count,
+                    total,
+                    f"Completed {completed_count}/{total}: {entity.name} ({entity_type})"
+                )
+
+            if error:
+                logger.warning("[%d/%d] %s used fallback persona: %s", completed_count, total, entity.name, error)
+            else:
+                logger.info("[%d/%d] Generated persona: %s (%s)", completed_count, total, entity.name, entity_type)
+
+        return [p for p in profiles if p is not None]
     
     def set_graph_id(self, graph_id: str):
         """Set graph_id for Zep search."""
@@ -907,6 +1161,24 @@ Important:
         
         # Capture locale before spawning thread pool workers
         current_locale = get_locale()
+
+        if use_llm:
+            import asyncio
+
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                return asyncio.run(
+                    self._generate_profiles_from_entities_async(
+                        entities=entities,
+                        use_llm=use_llm,
+                        progress_callback=progress_callback,
+                        parallel_count=parallel_count,
+                        realtime_output_path=realtime_output_path,
+                        output_platform=output_platform,
+                        current_locale=current_locale,
+                    )
+                )
 
         def generate_single_profile(idx: int, entity: EntityNode) -> tuple:
             """Worker for one profile."""

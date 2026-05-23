@@ -26,6 +26,18 @@ _ontology_lock = threading.Lock()
 _ontology_cache: Dict[str, Dict[str, Any]] = {}
 
 
+def _vertex_project_id() -> str:
+    return (
+        (Config.VERTEX_AI_PROJECT_ID or "").strip()
+        or (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+        or (os.environ.get("GCP_PROJECT") or "").strip()
+    )
+
+
+def _vertex_location() -> str:
+    return (Config.VERTEX_AI_LOCATION or "").strip()
+
+
 def _ensure_loop() -> asyncio.AbstractEventLoop:
     global _loop, _loop_thread
     with _loop_lock:
@@ -118,6 +130,7 @@ def _build_azure_clients() -> tuple[Any | None, Any | None, Any | None]:
 
 def _build_gemini_clients() -> tuple[Any | None, Any | None, Any | None]:
     try:
+        from google import genai
         from graphiti_core.embedder.gemini import GeminiEmbedder, GeminiEmbedderConfig
         from graphiti_core.llm_client.gemini_client import GeminiClient, LLMConfig
     except Exception as exc:
@@ -125,11 +138,35 @@ def _build_gemini_clients() -> tuple[Any | None, Any | None, Any | None]:
 
     model = Config.require_llm_model_name()
     model = model.split("/", 1)[1] if model.startswith("google/") else model
-    llm = GeminiClient(config=LLMConfig(model=model))
+    client_kwargs: dict[str, Any] = {}
+    if Config.LLM_PROVIDER == "vertex" or Config.LLM_USE_VERTEX_AI:
+        project = _vertex_project_id()
+        location = _vertex_location()
+        if not project or not location:
+            raise RuntimeError(
+                "Graphiti Gemini clients require VERTEX_AI_PROJECT_ID/GOOGLE_CLOUD_PROJECT "
+                "and VERTEX_AI_LOCATION when Vertex mode is enabled."
+            )
+        client_kwargs = {"vertexai": True, "project": project, "location": location}
+    else:
+        api_key = (
+            os.environ.get("GRAPHITI_GEMINI_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GOOGLE_API_KEY")
+            or Config.LLM_API_KEY
+        )
+        if api_key:
+            client_kwargs = {"api_key": api_key}
+
+    genai_client = genai.Client(**client_kwargs)
+    llm = GeminiClient(config=LLMConfig(model=model), client=genai_client)
     embedder = GeminiEmbedder(
         config=GeminiEmbedderConfig(
-            embedding_model=os.environ.get("GRAPHITI_GEMINI_EMBEDDING_MODEL", "text-embedding-004")
-        )
+            embedding_model=Config.GRAPHITI_GEMINI_EMBEDDING_MODEL,
+            embedding_dim=Config.GRAPHITI_GEMINI_EMBEDDING_DIM,
+        ),
+        client=genai_client,
+        batch_size=1,
     )
     return llm, embedder, None
 
@@ -145,7 +182,26 @@ def _build_clients() -> tuple[Any | None, Any | None, Any | None]:
         except Exception as exc:
             logger.warning("Falling back to OpenAI-compatible Graphiti clients: %s", exc)
     if embedder == "local":
-        logger.warning("GRAPHITI_EMBEDDER=local is not bundled; using OpenAI-compatible embeddings")
+        from .local_embedder import LocalHuggingFaceEmbedder
+
+        model = os.environ.get("GRAPHITI_LOCAL_EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
+        local_emb = LocalHuggingFaceEmbedder(model_name=model)
+        
+        # Keep OpenAI-compatible for LLM
+        from graphiti_core.llm_client.config import LLMConfig
+        from graphiti_core.llm_client.openai_client import OpenAIClient
+        
+        api_key = (
+            effective_llm_api_key_or_vertex_token()
+            if Config.LLM_PROVIDER == "vertex"
+            else Config.LLM_API_KEY
+        )
+        base_url = effective_llm_base_url() if Config.LLM_PROVIDER == "vertex" else Config.LLM_BASE_URL
+        llm_model = Config.require_llm_model_name()
+        llm = OpenAIClient(config=LLMConfig(api_key=api_key, base_url=base_url, model=llm_model))
+        
+        return llm, local_emb, None
+
     return _build_openai_clients()
 
 

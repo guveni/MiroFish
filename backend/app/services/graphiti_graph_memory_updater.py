@@ -38,18 +38,25 @@ class GraphitiGraphMemoryUpdater(ZepGraphMemoryUpdater):
         if not activities:
             return
 
-        combined_text = "\n".join(activity.to_episode_text() for activity in activities)
         for attempt in range(self.MAX_RETRIES):
             try:
                 async def _add():
                     from graphiti_core.nodes import EpisodeType
+                    from graphiti_core.utils.bulk_utils import RawEpisode
 
-                    return await self.client.add_episode(
-                        name=f"{platform}-activity-{int(time.time())}",
-                        episode_body=combined_text,
-                        source=EpisodeType.text,
-                        source_description=f"MiroFish {platform} simulation activity",
-                        reference_time=graphiti_client.utcnow(),
+                    bulk_episodes = [
+                        RawEpisode(
+                            name=f"{platform}-activity-{int(time.time())}-{i}",
+                            content=activity.to_episode_text(),
+                            source=EpisodeType.text,
+                            source_description=f"MiroFish {platform} simulation activity",
+                            reference_time=graphiti_client.utcnow(),
+                        )
+                        for i, activity in enumerate(activities)
+                    ]
+
+                    return await self.client.add_episode_bulk(
+                        bulk_episodes=bulk_episodes,
                         group_id=self.graph_id,
                         **graphiti_client.get_ontology(self.graph_id),
                     )
