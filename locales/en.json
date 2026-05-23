@@ -223,6 +223,9 @@
     "generatingReportBtn": "Starting..."
   },
   "step4": {
+    "focusMode": "Focus Mode",
+    "exitFocus": "Exit Focus Mode",
+    "downloadPDF": "Download PDF",
     "generatingSection": "Generating {title}...",
     "goToInteraction": "Enter Deep Interaction",
     "continueGeneration": "Continue Generation",

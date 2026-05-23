@@ -1,15 +1,34 @@
 <template>
   <div class="interaction-panel">
     <!-- Main Split Layout -->
-    <div class="main-split-layout">
+    <div class="main-split-layout" :class="{ 'is-focus-mode': isFocusMode }">
       <!-- LEFT PANEL: Report Style -->
       <div class="left-panel report-style" ref="leftPanel">
         <div v-if="reportOutline" class="report-content-wrapper">
           <!-- Report Header -->
           <div class="report-header-block">
             <div class="report-meta">
-              <span class="report-tag">Prediction Report</span>
-              <span class="report-id">ID: {{ reportId || 'REF-2024-X92' }}</span>
+              <div class="meta-left">
+                <span class="report-tag">Prediction Report</span>
+                <span class="report-id">ID: {{ reportId || 'REF-2024-X92' }}</span>
+              </div>
+              <div class="report-actions">
+                <button class="action-btn" @click="toggleFocusMode" :title="isFocusMode ? $t('step4.exitFocus') : $t('step4.focusMode')">
+                  <svg v-if="isFocusMode" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 14h6v6m10-6h-6v6M4 10h6V4m10 6h-6V4"/>
+                  </svg>
+                  <svg v-else viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+                  </svg>
+                  <span>{{ isFocusMode ? $t('step4.exitFocus') : $t('step4.focusMode') }}</span>
+                </button>
+                <button class="action-btn" @click="downloadPDF" :title="$t('step4.downloadPDF')">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                  </svg>
+                  <span>{{ $t('step4.downloadPDF') }}</span>
+                </button>
+              </div>
             </div>
             <h1 class="main-title">{{ reportOutline.title }}</h1>
             <p class="sub-title">{{ reportOutline.summary }}</p>
@@ -426,6 +445,7 @@ const props = defineProps({
 const emit = defineEmits(['add-log', 'update-status'])
 
 // State
+const isFocusMode = ref(false)
 const activeTab = ref('chat')
 const chatTarget = ref('report_agent')
 const showAgentDropdown = ref(false)
@@ -456,6 +476,14 @@ const currentSectionIndex = ref(null)
 const profiles = ref([])
 
 // Helper Methods
+const toggleFocusMode = () => {
+  isFocusMode.value = !isFocusMode.value
+}
+
+const downloadPDF = () => {
+  window.print()
+}
+
 const isSectionCompleted = (sectionIndex) => {
   return !!generatedSections.value[sectionIndex]
 }
@@ -1031,8 +1059,109 @@ watch(() => props.simulationId, (newId) => {
 .report-meta {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: space-between;
   margin-bottom: 24px;
+}
+
+.meta-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.report-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #F3F4F6;
+  border: 1px solid #E5E7EB;
+  color: #374151;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.action-btn:hover {
+  background: #E5E7EB;
+  color: #111827;
+}
+
+.action-btn svg {
+  flex-shrink: 0;
+}
+
+/* Focus Mode CSS */
+.main-split-layout.is-focus-mode .left-panel.report-style {
+  width: 100% !important;
+  max-width: none !important;
+  border-right: none !important;
+  padding: 40px 0 80px 0 !important;
+}
+
+.main-split-layout.is-focus-mode .report-content-wrapper {
+  max-width: 800px !important;
+  width: 100% !important;
+  margin: 0 auto !important;
+  padding: 0 40px !important;
+  box-sizing: border-box !important;
+}
+
+.main-split-layout.is-focus-mode .right-panel {
+  display: none !important;
+}
+
+/* Printing CSS */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  
+  .left-panel.report-style,
+  .left-panel.report-style *,
+  .report-content-wrapper,
+  .report-content-wrapper * {
+    visibility: visible;
+  }
+  
+  .left-panel.report-style {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    overflow: visible !important;
+  }
+  
+  .report-content-wrapper {
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+  
+  .report-actions {
+    display: none !important;
+  }
+  
+  .report-header-block {
+    page-break-after: avoid;
+  }
+  
+  .report-section-item {
+    page-break-inside: auto;
+  }
 }
 
 .report-tag {
