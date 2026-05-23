@@ -6,7 +6,7 @@ from typing import Optional, Dict, Any, List
 from openai import AzureOpenAI, OpenAI
 
 from ..config import Config
-from .openai_tracing import attach_completion_usage_metadata, wrap_openai_client
+from .openai_tracing import wrap_openai_client
 from .pipeline_retry import run_pipeline_step
 from .vertex_openai import (
     effective_llm_api_key_or_vertex_token,
@@ -65,20 +65,25 @@ class LLMClient:
                     api_key=self.api_key or Config.AZURE_OPENAI_API_KEY,
                     azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
                     api_version=Config.AZURE_OPENAI_API_VERSION,
-                )
+                ),
+                model=self.model,
             )
         elif not self._vertex:
             self.client = wrap_openai_client(
                 OpenAI(
                     api_key=self.api_key or Config.LLM_API_KEY,
                     base_url=self.base_url,
-                )
+                ),
+                model=self.model,
             )
 
     def _active_client(self) -> OpenAI:
         if self._vertex:
             key = effective_llm_api_key_or_vertex_token(self.api_key)
-            return wrap_openai_client(OpenAI(api_key=key, base_url=self.base_url))
+            return wrap_openai_client(
+                OpenAI(api_key=key, base_url=self.base_url),
+                model=self.model,
+            )
         assert self.client is not None
         return self.client
     
@@ -109,7 +114,6 @@ class LLMClient:
             _complete,
             retry_unknown_errors=False,
         )
-        attach_completion_usage_metadata(response, model=self.model)
         if not response.choices:
             raise ValueError("LLM returned no choices")
         choice = response.choices[0]
