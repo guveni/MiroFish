@@ -137,7 +137,7 @@ class Config:
     GRAPHITI_BATCH_HEARTBEAT_SECONDS = int(os.environ.get('GRAPHITI_BATCH_HEARTBEAT_SECONDS', '90'))
     GRAPHITI_BATCH_SIZE = int(os.environ.get('GRAPHITI_BATCH_SIZE', '10'))
     GRAPHITI_LOCAL_EMBEDDING_MODEL = (
-        os.environ.get('GRAPHITI_LOCAL_EMBEDDING_MODEL') or 'Alibaba-NLP/gte-large-en-v1.5'
+        os.environ.get('GRAPHITI_LOCAL_EMBEDDING_MODEL') or 'BAAI/bge-small-en-v1.5'
     )
     GRAPHITI_GEMINI_EMBEDDING_MODEL = (
         os.environ.get('GRAPHITI_GEMINI_EMBEDDING_MODEL') or 'gemini-embedding-001'

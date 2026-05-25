@@ -55,3 +55,30 @@ def test_gemini_graphiti_clients_require_vertex_location(monkeypatch):
         assert "VERTEX_AI_LOCATION" in str(exc)
     else:
         raise AssertionError("Expected missing Vertex location to fail")
+
+
+def test_local_embedder_dimension_detection(monkeypatch):
+    from app.utils.local_embedder import LocalHuggingFaceEmbedder
+    # Mock HuggingFaceEmbeddings to avoid downloading a huge model during pytest
+    class MockHuggingFaceEmbeddings:
+        def __init__(self, model_name, model_kwargs):
+            self.model_name = model_name
+            
+            # Mock client with get_sentence_embedding_dimension
+            class MockClient:
+                def get_sentence_embedding_dimension(self):
+                    return 384
+            self.client = MockClient()
+
+        def embed_query(self, text):
+            return [0.1] * 384
+
+    monkeypatch.setattr("langchain_huggingface.HuggingFaceEmbeddings", MockHuggingFaceEmbeddings)
+
+    # Test with default dimension (should detect 384)
+    embedder = LocalHuggingFaceEmbedder(model_name="BAAI/bge-small-en-v1.5")
+    assert embedder.config.embedding_dim == 384
+
+    # Test with explicitly specified dimension
+    embedder_explicit = LocalHuggingFaceEmbedder(model_name="BAAI/bge-small-en-v1.5", embedding_dim=512)
+    assert embedder_explicit.config.embedding_dim == 512

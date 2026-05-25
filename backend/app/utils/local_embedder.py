@@ -8,15 +8,30 @@ from graphiti_core.embedder.client import EmbedderClient, EmbedderConfig
 
 
 class LocalHuggingFaceEmbedder(EmbedderClient):
-    def __init__(self, model_name: str, embedding_dim: int = 1024):
+    def __init__(self, model_name: str, embedding_dim: int | None = None):
         from langchain_huggingface import HuggingFaceEmbeddings
 
         device = os.environ.get("HF_EMBEDDER_DEVICE", "cpu")
-        self.config = EmbedderConfig(embedding_dim=embedding_dim)
         self._model = HuggingFaceEmbeddings(
             model_name=model_name,
             model_kwargs={"device": device, "trust_remote_code": True},
         )
+
+        # Dynamically detect embedding dimension if not explicitly provided
+        if embedding_dim is None:
+            try:
+                # Try HuggingFaceEmbeddings/SentenceTransformer's method first
+                if hasattr(self._model, "client") and hasattr(self._model.client, "get_sentence_embedding_dimension"):
+                    detected_dim = self._model.client.get_sentence_embedding_dimension()
+                else:
+                    # Fallback to embedding a dummy string
+                    detected_dim = len(self._model.embed_query("dim_test"))
+                embedding_dim = detected_dim
+            except Exception:
+                # Fallback default values
+                embedding_dim = 384 if "bge-small" in model_name else 1024
+
+        self.config = EmbedderConfig(embedding_dim=embedding_dim)
 
     async def create(
         self, input_data: str | list[str] | Iterable[int] | Iterable[Iterable[int]]

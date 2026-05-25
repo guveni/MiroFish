@@ -220,7 +220,19 @@
     "forceStopSuccess": "Simulation force stopped",
     "forceStopFailed": "Force stop failed: {error}",
     "startGenerateReportBtn": "Generate Report",
-    "generatingReportBtn": "Starting..."
+    "generatingReportBtn": "Starting...",
+    "twitterPlatformProgress": "Twitter Platform Progress",
+    "availableActionsHint": "Available Actions",
+    "redditPlatformProgress": "Reddit Platform Progress",
+    "createPostLabel": "Post",
+    "quotePostLabel": "Quote Post",
+    "repostLabel": "Repost",
+    "likePostLabel": "Like Post",
+    "createCommentLabel": "Create Comment",
+    "searchPostsLabel": "Search Posts",
+    "followUserLabel": "Follow User",
+    "doNothingLabel": "No operation (silent)",
+    "generalFallbackLabel": "General fallback: Unknown type or content exists but not handled above"
   },
   "step4": {
     "focusMode": "Focus Mode",
