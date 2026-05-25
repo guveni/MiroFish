@@ -467,17 +467,27 @@ class OasisProfileGenerator:
 
     def _has_sufficient_direct_context(self, entity: EntityNode) -> bool:
         """Return True when fetched edges/nodes already provide enough facts."""
-        fact_count = sum(
+        score = 0
+
+        # A substantial summary already gives good context.
+        if entity.summary and len(entity.summary.strip()) >= 50:
+            score += 2
+
+        # Meaningful attributes contribute context.
+        if entity.attributes:
+            score += min(len(entity.attributes), 2)
+
+        score += sum(
             1
             for edge in (entity.related_edges or [])
             if (edge.get("fact") or "").strip()
         )
-        node_context_count = sum(
+        score += sum(
             1
             for node in (entity.related_nodes or [])
             if (node.get("summary") or node.get("name") or "").strip()
         )
-        return fact_count + node_context_count >= 3
+        return score >= 3
     
     def _build_entity_context(self, entity: EntityNode) -> str:
         """

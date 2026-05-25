@@ -776,14 +776,6 @@ def delete_simulation(simulation_id: str):
             
         delete_project = request.args.get('delete_project', 'false').lower() == 'true'
         
-        # Stop simulation if it's running
-        if state.status == 'running':
-            try:
-                runner = manager.get_runner(simulation_id)
-                runner.stop()
-            except Exception as e:
-                logger.warning(f"Failed to stop simulation before deletion: {e}")
-                
         # Delete simulation directory
         sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)
         if os.path.exists(sim_dir):
@@ -792,12 +784,9 @@ def delete_simulation(simulation_id: str):
                 shutil.rmtree(sim_dir)
             except Exception as e:
                 logger.warning(f"Failed to delete simulation directory {sim_dir}: {e}")
-                
-        # Remove from state dict and file
-        with manager._lock:
-            if simulation_id in manager.simulations:
-                del manager.simulations[simulation_id]
-                manager._save_state()
+
+        # Remove from in-memory cache
+        manager._simulations.pop(simulation_id, None)
                 
         # Delete run checkpoints if any
         try:

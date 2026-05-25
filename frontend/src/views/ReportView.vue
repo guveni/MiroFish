@@ -4,6 +4,13 @@
     <header class="app-header">
       <div class="header-left">
         <div class="brand" @click="router.push('/')">MIROFISH</div>
+        <template v-if="projectData?.simulation_requirement">
+          <div class="header-divider"></div>
+          <div class="header-query" :title="projectData.simulation_requirement">
+            <span class="query-label">Query:</span>
+            <span class="query-text">{{ projectData.simulation_requirement }}</span>
+          </div>
+        </template>
       </div>
       
       <div class="header-center">
@@ -252,6 +259,44 @@ onMounted(() => {
   font-size: 18px;
   letter-spacing: 1px;
   cursor: pointer;
+  flex-shrink: 0;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 35%;
+  overflow: hidden;
+}
+
+.header-divider {
+  width: 1px;
+  height: 16px;
+  background-color: #E0E0E0;
+}
+
+.header-query {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #666;
+}
+
+.query-label {
+  font-weight: 600;
+  color: #000;
+  flex-shrink: 0;
+}
+
+.query-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .view-switcher {

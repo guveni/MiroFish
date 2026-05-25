@@ -1363,6 +1363,20 @@ class SimulationRunner:
         # 清理内存中的状态
         cls._processes.clear()
         cls._action_queues.clear()
+
+        # Shut down the Graphiti background event loop and driver to avoid
+        # leaked semaphores and dangling connections on exit.
+        try:
+            from ..utils import graphiti_client as _gc
+            if _gc._client is not None:
+                try:
+                    _gc.run_async(_gc._client.close(), timeout=5)
+                except Exception:
+                    pass
+            if _gc._loop and _gc._loop.is_running():
+                _gc._loop.call_soon_threadsafe(_gc._loop.stop)
+        except Exception:
+            pass
         
         logger.info("模拟进程清理完成")
     

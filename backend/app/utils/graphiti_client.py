@@ -57,11 +57,16 @@ def _ensure_loop() -> asyncio.AbstractEventLoop:
         return loop
 
 
-def run_async(coro):
-    """Run a Graphiti coroutine on the shared background event loop."""
+def run_async(coro, timeout: float | None = None):
+    """Run a Graphiti coroutine on the shared background event loop.
+
+    Args:
+        coro: Awaitable to schedule.
+        timeout: Max seconds to wait. None means wait forever.
+    """
     loop = _ensure_loop()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
-    return future.result()
+    return future.result(timeout=timeout)
 
 
 def _set_default_openai_env() -> None:
@@ -184,8 +189,7 @@ def _build_clients() -> tuple[Any | None, Any | None, Any | None]:
     if embedder == "local":
         from .local_embedder import LocalHuggingFaceEmbedder
 
-        model = os.environ.get("GRAPHITI_LOCAL_EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
-        local_emb = LocalHuggingFaceEmbedder(model_name=model)
+        local_emb = LocalHuggingFaceEmbedder(model_name=Config.GRAPHITI_LOCAL_EMBEDDING_MODEL)
         
         # Keep OpenAI-compatible for LLM
         from graphiti_core.llm_client.config import LLMConfig

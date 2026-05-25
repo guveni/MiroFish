@@ -47,28 +47,19 @@ class GraphitiToolsService(ZepToolsService):
         limit: int = 10,
         scope: str = "edges",
     ) -> SearchResult:
+        from ..config import Config
+
         logger.info(t("console.graphSearch", graphId=graph_id, query=query[:50]))
         try:
-            from graphiti_core.search.search_config_recipes import (
-                COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
-                EDGE_HYBRID_SEARCH_CROSS_ENCODER,
-                NODE_HYBRID_SEARCH_CROSS_ENCODER,
-            )
-
-            if scope == "nodes":
-                config = copy.deepcopy(NODE_HYBRID_SEARCH_CROSS_ENCODER)
-            elif scope == "both":
-                config = copy.deepcopy(COMBINED_HYBRID_SEARCH_CROSS_ENCODER)
-            else:
-                config = copy.deepcopy(EDGE_HYBRID_SEARCH_CROSS_ENCODER)
-            config.limit = limit
+            config = self._get_search_config(scope, limit)
 
             results = graphiti_client.run_async(
                 self.client.search_(
                     query=query,
                     config=config,
                     group_ids=[graph_id],
-                )
+                ),
+                timeout=Config.GRAPHITI_SEARCH_TIMEOUT,
             )
 
             facts = []
@@ -98,6 +89,45 @@ class GraphitiToolsService(ZepToolsService):
         except Exception as exc:
             logger.warning(t("console.zepSearchApiFallback", error=str(exc)))
             return self._local_search(graph_id, query, limit, scope)
+
+    def _get_search_config(self, scope: str, limit: int):
+        """Return the appropriate search config, preferring RRF when no cross-encoder is available."""
+        from ..config import Config
+
+        # When embedder is local and reranker is auto, no cross-encoder is wired;
+        # fall back to RRF to avoid expensive LLM-based reranking per search.
+        if Config.GRAPHITI_RERANKER == "auto" and Config.GRAPHITI_EMBEDDER == "local":
+            use_cross_encoder = False
+        else:
+            use_cross_encoder = Config.GRAPHITI_RERANKER not in ("none", "disabled", "local", "rrf")
+
+        if use_cross_encoder:
+            from graphiti_core.search.search_config_recipes import (
+                COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
+                EDGE_HYBRID_SEARCH_CROSS_ENCODER,
+                NODE_HYBRID_SEARCH_CROSS_ENCODER,
+            )
+            if scope == "nodes":
+                config = copy.deepcopy(NODE_HYBRID_SEARCH_CROSS_ENCODER)
+            elif scope == "both":
+                config = copy.deepcopy(COMBINED_HYBRID_SEARCH_CROSS_ENCODER)
+            else:
+                config = copy.deepcopy(EDGE_HYBRID_SEARCH_CROSS_ENCODER)
+        else:
+            from graphiti_core.search.search_config_recipes import (
+                COMBINED_HYBRID_SEARCH_RRF,
+                EDGE_HYBRID_SEARCH_RRF,
+                NODE_HYBRID_SEARCH_RRF,
+            )
+            if scope == "nodes":
+                config = copy.deepcopy(NODE_HYBRID_SEARCH_RRF)
+            elif scope == "both":
+                config = copy.deepcopy(COMBINED_HYBRID_SEARCH_RRF)
+            else:
+                config = copy.deepcopy(EDGE_HYBRID_SEARCH_RRF)
+
+        config.limit = limit
+        return config
 
     def get_all_nodes(self, graph_id: str) -> List[NodeInfo]:
         nodes = fetch_all_nodes(graph_id)

@@ -478,7 +478,7 @@
     "generatingEventConfig": "Generating event config and hot topics...",
     "generatingAgentConfig": "Generating agent config ({start}-{end}/{total})...",
     "generatingPlatformConfig": "Generating platform config...",
-    "zepSearchQuery": "All information, activities, events, relationships and background about {name}",
+    "zepSearchQuery": "{name}",
     "timeConfigLabel": "Time Config",
     "eventConfigLabel": "Event Config",
     "agentConfigResult": "Agent Config: {count} generated",

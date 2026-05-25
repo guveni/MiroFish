@@ -106,11 +106,12 @@ class Config:
     GRAPHITI_EMBEDDER = (os.environ.get('GRAPHITI_EMBEDDER') or 'auto').strip().lower()
     GRAPHITI_RERANKER = (os.environ.get('GRAPHITI_RERANKER') or 'auto').strip().lower()
     GRAPHITI_SEMAPHORE_LIMIT = int(os.environ.get('GRAPHITI_SEMAPHORE_LIMIT', '10'))
+    GRAPHITI_SEARCH_TIMEOUT = int(os.environ.get('GRAPHITI_SEARCH_TIMEOUT', '30'))
     # Expected seconds per Graphiti bulk batch; used for in-batch progress heartbeat only.
     GRAPHITI_BATCH_HEARTBEAT_SECONDS = int(os.environ.get('GRAPHITI_BATCH_HEARTBEAT_SECONDS', '90'))
     GRAPHITI_BATCH_SIZE = int(os.environ.get('GRAPHITI_BATCH_SIZE', '10'))
     GRAPHITI_LOCAL_EMBEDDING_MODEL = (
-        os.environ.get('GRAPHITI_LOCAL_EMBEDDING_MODEL') or 'BAAI/bge-large-en-v1.5'
+        os.environ.get('GRAPHITI_LOCAL_EMBEDDING_MODEL') or 'Alibaba-NLP/gte-large-en-v1.5'
     )
     GRAPHITI_GEMINI_EMBEDDING_MODEL = (
         os.environ.get('GRAPHITI_GEMINI_EMBEDDING_MODEL') or 'gemini-embedding-001'
