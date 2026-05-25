@@ -76,6 +76,9 @@ def _set_default_openai_env() -> None:
     if Config.LLM_PROVIDER == "vertex":
         os.environ.setdefault("OPENAI_API_KEY", effective_llm_api_key_or_vertex_token())
         os.environ.setdefault("OPENAI_BASE_URL", effective_llm_base_url())
+    elif Config.LLM_PROVIDER == "ollama":
+        os.environ.setdefault("OPENAI_API_KEY", "ollama")
+        os.environ.setdefault("OPENAI_BASE_URL", Config.OLLAMA_BASE_URL)
     else:
         if Config.LLM_API_KEY:
             os.environ.setdefault("OPENAI_API_KEY", Config.LLM_API_KEY)
@@ -90,13 +93,7 @@ def _build_openai_clients() -> tuple[Any | None, Any | None, Any | None]:
     from graphiti_core.llm_client.config import LLMConfig
     from graphiti_core.llm_client.openai_client import OpenAIClient
 
-    api_key = (
-        effective_llm_api_key_or_vertex_token()
-        if Config.LLM_PROVIDER == "vertex"
-        else Config.LLM_API_KEY
-    )
-    base_url = effective_llm_base_url() if Config.LLM_PROVIDER == "vertex" else Config.LLM_BASE_URL
-    model = Config.require_llm_model_name()
+    api_key, base_url, model = _resolve_openai_compat_llm_params()
     llm = OpenAIClient(config=LLMConfig(api_key=api_key, base_url=base_url, model=model))
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
@@ -176,35 +173,54 @@ def _build_gemini_clients() -> tuple[Any | None, Any | None, Any | None]:
     return llm, embedder, None
 
 
+def _resolve_openai_compat_llm_params() -> tuple[str, str | None, str]:
+    """Return (api_key, base_url, model) for any OpenAI-compatible LLM provider."""
+    if Config.LLM_PROVIDER == "vertex":
+        api_key = effective_llm_api_key_or_vertex_token()
+        base_url = effective_llm_base_url()
+    elif Config.LLM_PROVIDER == "ollama":
+        api_key = "ollama"
+        base_url = Config.OLLAMA_BASE_URL
+    else:
+        api_key = Config.LLM_API_KEY or ""
+        base_url = Config.LLM_BASE_URL
+    return api_key, base_url, Config.require_llm_model_name()
+
+
+def _build_local_embedder_clients() -> tuple[Any, Any, None]:
+    """Local HF embedder + OpenAI-compatible LLM (works for any provider)."""
+    from .local_embedder import LocalHuggingFaceEmbedder
+    from graphiti_core.llm_client.config import LLMConfig
+    from graphiti_core.llm_client.openai_client import OpenAIClient
+
+    local_emb = LocalHuggingFaceEmbedder(model_name=Config.GRAPHITI_LOCAL_EMBEDDING_MODEL)
+    api_key, base_url, llm_model = _resolve_openai_compat_llm_params()
+    llm = OpenAIClient(config=LLMConfig(api_key=api_key, base_url=base_url, model=llm_model))
+    return llm, local_emb, None
+
+
 def _build_clients() -> tuple[Any | None, Any | None, Any | None]:
     embedder = Config.GRAPHITI_EMBEDDER
     provider = Config.LLM_PROVIDER
+
     if provider == "azure" or embedder == "azure":
         return _build_azure_clients()
+
+    # Honour explicit local embedder before provider-specific builders so that
+    # e.g. LLM_PROVIDER=vertex + GRAPHITI_EMBEDDER=local uses the local HF
+    # embedder instead of GeminiEmbedder.
+    if embedder == "local":
+        return _build_local_embedder_clients()
+
+    # Ollama is always OpenAI-compatible; skip the Gemini path entirely.
+    if provider == "ollama":
+        return _build_openai_clients()
+
     if provider == "vertex" or embedder == "vertex":
         try:
             return _build_gemini_clients()
         except Exception as exc:
             logger.warning("Falling back to OpenAI-compatible Graphiti clients: %s", exc)
-    if embedder == "local":
-        from .local_embedder import LocalHuggingFaceEmbedder
-
-        local_emb = LocalHuggingFaceEmbedder(model_name=Config.GRAPHITI_LOCAL_EMBEDDING_MODEL)
-        
-        # Keep OpenAI-compatible for LLM
-        from graphiti_core.llm_client.config import LLMConfig
-        from graphiti_core.llm_client.openai_client import OpenAIClient
-        
-        api_key = (
-            effective_llm_api_key_or_vertex_token()
-            if Config.LLM_PROVIDER == "vertex"
-            else Config.LLM_API_KEY
-        )
-        base_url = effective_llm_base_url() if Config.LLM_PROVIDER == "vertex" else Config.LLM_BASE_URL
-        llm_model = Config.require_llm_model_name()
-        llm = OpenAIClient(config=LLMConfig(api_key=api_key, base_url=base_url, model=llm_model))
-        
-        return llm, local_emb, None
 
     return _build_openai_clients()
 

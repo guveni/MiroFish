@@ -28,6 +28,16 @@
                   </svg>
                   <span>{{ $t('step4.downloadPDF') }}</span>
                 </button>
+                <button class="action-btn" @click="recreateReport" :disabled="isRecreating || !props.simulationId" :title="$t('step4.recreateReport')">
+                  <svg v-if="isRecreating" class="spin-icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10" stroke-width="3" stroke="#E5E7EB"></circle>
+                    <path d="M12 2a10 10 0 0 1 10 10" stroke-width="3" stroke="#4B5563" stroke-linecap="round"></path>
+                  </svg>
+                  <svg v-else viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+                  </svg>
+                  <span>{{ isRecreating ? $t('step4.recreating') : $t('step4.recreateReport') }}</span>
+                </button>
               </div>
             </div>
             <h1 class="main-title">{{ reportOutline.title }}</h1>
@@ -461,6 +471,7 @@ const collapsedSections = ref(new Set())
 const isComplete = ref(false)
 const isFailed = ref(false)
 const isContinuing = ref(false)
+const isRecreating = ref(false)
 const startTime = ref(null)
 const leftPanel = ref(null)
 const rightPanel = ref(null)
@@ -2239,6 +2250,46 @@ const handleContinue = async () => {
   }
 }
 
+const recreateReport = async () => {
+  if (isRecreating.value || !props.simulationId) return
+  
+  const confirmed = window.confirm(t('step4.confirmRecreate'))
+  if (!confirmed) return
+  
+  isRecreating.value = true
+  emit('update-status', 'processing')
+  
+  try {
+    // Stop polling the current report logs
+    stopPolling()
+    
+    const res = await generateReport({
+      simulation_id: props.simulationId,
+      force_regenerate: true
+    })
+    
+    if (res.success && res.data) {
+      const newReportId = res.data.report_id
+      emit('add-log', `Recreating report started: ${newReportId}`)
+      
+      // Navigate to the new report page
+      router.push({ name: 'Report', params: { reportId: newReportId } })
+    } else {
+      console.error('Failed to recreate report:', res.error)
+      emit('add-log', `Recreation failed: ${res.error || 'Unknown error'}`)
+      emit('update-status', 'error')
+      startPolling() // Resume polling for current report
+    }
+  } catch (err) {
+    console.error('Failed to recreate report:', err)
+    emit('add-log', `Recreation exception: ${err.message}`)
+    emit('update-status', 'error')
+    startPolling() // Resume polling for current report
+  } finally {
+    isRecreating.value = false
+  }
+}
+
 const startPolling = () => {
   if (agentLogTimer || consoleLogTimer) return
   
@@ -2487,6 +2538,14 @@ watch(() => props.reportId, (newId) => {
 .action-btn:hover {
   background: #E5E7EB;
   color: #111827;
+}
+
+.action-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: #F3F4F6;
+  color: #9CA3AF;
+  border-color: #E5E7EB;
 }
 
 .action-btn svg {
@@ -3452,6 +3511,14 @@ watch(() => props.reportId, (newId) => {
   background: #E5E7EB;
   color: #374151;
   border-color: #D1D5DB;
+}
+
+.action-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  background: #F3F4F6;
+  color: #9CA3AF;
+  border-color: #E5E7EB;
 }
 
 /* Result Wrapper */

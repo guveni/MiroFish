@@ -21,7 +21,7 @@ if str(_backend_dir) not in sys.path:
 
 
 def main() -> int:
-    from app.services.gemini_web_search import (
+    from app.services.web_search import (
         GEMINI_WEB_SEARCH_MODEL_NOT_SET,
         GEMINI_WEB_SEARCH_VERTEX_NOT_CONFIGURED,
         gemini_web_search_configured,

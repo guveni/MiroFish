@@ -83,6 +83,12 @@ def generate_report():
                         "already_generated": True
                     }
                 })
+        else:
+            # 清理旧的报告以防冲突
+            existing_report = ReportManager.get_report_by_simulation(simulation_id)
+            if existing_report:
+                logger.info(f"Deleting existing report {existing_report.report_id} for simulation {simulation_id} because of force_regenerate")
+                ReportManager.delete_report(existing_report.report_id)
         
         # 获取项目信息
         project = ProjectManager.get_project(state.project_id)

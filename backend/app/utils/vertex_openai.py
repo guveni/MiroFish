@@ -132,9 +132,19 @@ def prepare_camel_openai_env() -> Tuple[str, str, str]:
     Returns:
         (llm_model_name, llm_base_url_display, hint for logs)
     """
+    from ..config import Config
+
     llm_model = os.environ.get("LLM_MODEL_NAME", "").strip()
     if not llm_model:
         raise ValueError("LLM_MODEL_NAME must be explicitly configured in .env")
+
+    provider = (os.environ.get("LLM_PROVIDER") or "").strip().lower()
+
+    if provider == "ollama":
+        ollama_base = Config.OLLAMA_BASE_URL
+        os.environ["OPENAI_API_KEY"] = "ollama"
+        os.environ["OPENAI_API_BASE_URL"] = ollama_base
+        return llm_model, ollama_base, "ollama-local"
 
     base = effective_llm_base_url()
     token_or_key = effective_llm_api_key_or_vertex_token()

@@ -983,6 +983,7 @@ class ZepToolsService:
             InsightForgeResult: 深度洞察检索结果
         """
         logger.info(t("console.insightForgeStart", query=query[:50]))
+        logger.info("[InsightForge] Starting deep insight retrieval workflow...")
         
         result = InsightForgeResult(
             query=query,
@@ -991,6 +992,7 @@ class ZepToolsService:
         )
         
         # Step 1: 使用LLM生成子问题
+        logger.info("[InsightForge] Step 1: Generating sub-queries via LLM to decompose the original query...")
         sub_queries = self._generate_sub_queries(
             query=query,
             simulation_requirement=simulation_requirement,
@@ -1001,11 +1003,13 @@ class ZepToolsService:
         logger.info(t("console.generatedSubQueries", count=len(sub_queries)))
         
         # Step 2: 对每个子问题进行语义搜索
+        logger.info(f"[InsightForge] Step 2: Performing semantic graph searches for {len(sub_queries)} sub-queries plus the main query...")
         all_facts = []
         all_edges = []
         seen_facts = set()
         
-        for sub_query in sub_queries:
+        for idx, sub_query in enumerate(sub_queries):
+            logger.info(f" - [{idx+1}/{len(sub_queries)}] Searching for sub-query: '{sub_query}'")
             search_result = self.search_graph(
                 graph_id=graph_id,
                 query=sub_query,
@@ -1021,6 +1025,7 @@ class ZepToolsService:
             all_edges.extend(search_result.edges)
         
         # 对原始问题也进行搜索
+        logger.info(f" - [Main] Searching for original main query: '{query[:100]}...'")
         main_search = self.search_graph(
             graph_id=graph_id,
             query=query,
@@ -1036,6 +1041,7 @@ class ZepToolsService:
         result.total_facts = len(all_facts)
         
         # Step 3: 从边中提取相关实体UUID，只获取这些实体的信息（不获取全部节点）
+        logger.info("[InsightForge] Step 3: Extracting unique entity UUIDs from edge relationships...")
         entity_uuids = set()
         for edge_data in all_edges:
             if isinstance(edge_data, dict):
@@ -1046,17 +1052,19 @@ class ZepToolsService:
                 if target_uuid:
                     entity_uuids.add(target_uuid)
         
+        logger.info(f"[InsightForge] Extracted {len(entity_uuids)} entity UUIDs. Fetching details and mapping facts for each...")
         # 获取所有相关实体的详情（不限制数量，完整输出）
         entity_insights = []
         node_map = {}  # 用于后续关系链构建
         
-        for uuid in list(entity_uuids):  # 处理所有实体，不截断
+        for idx, uuid in enumerate(list(entity_uuids)):  # 处理所有实体，不截断
             if not uuid:
                 continue
             try:
                 # 单独获取每个相关节点的信息
                 node = self.get_node_detail(uuid)
                 if node:
+                    logger.info(f" - [{idx+1}/{len(entity_uuids)}] Fetched entity: '{node.name}' (Type: {next((l for l in node.labels if l not in ['Entity', 'Node']), 'Entity')})")
                     node_map[uuid] = node
                     entity_type = next((l for l in node.labels if l not in ["Entity", "Node"]), "实体")
                     
@@ -1081,6 +1089,7 @@ class ZepToolsService:
         result.total_entities = len(entity_insights)
         
         # Step 4: 构建所有关系链（不限制数量）
+        logger.info(f"[InsightForge] Step 4: Constructing relationship chains from {len(all_edges)} edges...")
         relationship_chains = []
         for edge_data in all_edges:  # 处理所有边，不截断
             if isinstance(edge_data, dict):
@@ -1099,6 +1108,7 @@ class ZepToolsService:
         result.total_relationships = len(relationship_chains)
         
         logger.info(t("console.insightForgeComplete", facts=result.total_facts, entities=result.total_entities, relationships=result.total_relationships))
+        logger.info(f"[InsightForge] Generation complete: compiled {len(entity_insights)} entity profiles and constructed {len(relationship_chains)} relationship chains.")
         return result
     
     def _generate_sub_queries(
@@ -1113,6 +1123,7 @@ class ZepToolsService:
         
         将复杂问题分解为多个可以独立检索的子问题
         """
+        logger.info(f"[InsightForge] Prompting LLM to decompose query: '{query[:100]}...'")
         system_prompt = """你是一个专业的问题分析专家。你的任务是将一个复杂问题分解为多个可以在模拟世界中独立观察的子问题。
 
 要求：
@@ -1141,6 +1152,7 @@ class ZepToolsService:
             )
             
             sub_queries = response.get("sub_queries", [])
+            logger.info(f"[InsightForge] LLM successfully decomposed query into {len(sub_queries)} sub-queries.")
             # 确保是字符串列表
             return [str(sq) for sq in sub_queries[:max_queries]]
             

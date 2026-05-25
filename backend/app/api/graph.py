@@ -18,7 +18,7 @@ from ..services.run_checkpoint_store import (
     checkpoint_project_stage,
     load_project_stage_checkpoint,
 )
-from ..services.gemini_web_search import (
+from ..services.web_search import (
     EMPTY_GEMINI_WEB_SEARCH_RESULTS,
     GEMINI_WEB_SEARCH_MODEL_NOT_SET,
     GEMINI_WEB_SEARCH_VERTEX_NOT_CONFIGURED,

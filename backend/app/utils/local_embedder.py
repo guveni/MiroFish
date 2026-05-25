@@ -15,7 +15,7 @@ class LocalHuggingFaceEmbedder(EmbedderClient):
         self.config = EmbedderConfig(embedding_dim=embedding_dim)
         self._model = HuggingFaceEmbeddings(
             model_name=model_name,
-            model_kwargs={"device": device},
+            model_kwargs={"device": device, "trust_remote_code": True},
         )
 
     async def create(

@@ -61,10 +61,11 @@ class Config:
     # JSON settings. Keep Unicode readable instead of escaping it as \uXXXX.
     JSON_AS_ASCII = False
     
-    # LLM settings. LLM_PROVIDER choices: openai, azure, vertex.
+    # LLM settings. LLM_PROVIDER choices: openai, azure, vertex, ollama.
     LLM_PROVIDER = _llm_provider()
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
+    OLLAMA_BASE_URL = (os.environ.get('OLLAMA_BASE_URL') or 'http://localhost:11434/v1').strip()
     LLM_MODEL_NAME = (os.environ.get('LLM_MODEL_NAME') or '').strip()
     LLM_USE_VERTEX_AI = (
         LLM_PROVIDER == 'vertex'
@@ -96,7 +97,19 @@ class Config:
     GEMINI_WEB_SEARCH_MAX_QUERIES = int(os.environ.get('GEMINI_WEB_SEARCH_MAX_QUERIES', '5'))
     GEMINI_WEB_SEARCH_MAX_CHARS = int(os.environ.get('GEMINI_WEB_SEARCH_MAX_CHARS', '25000'))
     GEMINI_WEB_SEARCH_MAX_OUTPUT_TOKENS = int(os.environ.get('GEMINI_WEB_SEARCH_MAX_OUTPUT_TOKENS', '8192'))
-    
+
+    # Web search provider (independent of LLM_PROVIDER).
+    # Choices: vertex_gemini, keiro, none.  Empty string resolved at class level.
+    _raw_web_search_provider = (os.environ.get('WEB_SEARCH_PROVIDER') or '').strip().lower()
+    WEB_SEARCH_PROVIDER: str = ''  # resolved after class body (see bottom of class)
+
+    # Keiro web search settings.
+    KEIRO_API_KEY = os.environ.get('KEIRO_API_KEY', '')
+    KEIRO_API_BASE_URL = (os.environ.get('KEIRO_API_BASE_URL') or 'https://kierolabs.space/api/v2').strip()
+    KEIRO_SEARCH_ENDPOINT = (os.environ.get('KEIRO_SEARCH_ENDPOINT') or '/search/content').strip()
+    KEIRO_MAX_RESULTS_PER_QUERY = int(os.environ.get('KEIRO_MAX_RESULTS_PER_QUERY', '10'))
+    KEIRO_TIMEOUT_SEC = int(os.environ.get('KEIRO_TIMEOUT_SEC', '30'))
+
     # Graph memory backend. Unset/empty defaults to Neo4j + Graphiti.
     GRAPH_BACKEND = (os.environ.get('GRAPH_BACKEND') or 'neo4j').strip().lower()
     NEO4J_URI = (os.environ.get('NEO4J_URI') or 'bolt://localhost:7687').strip()
@@ -187,9 +200,11 @@ class Config:
     def validate(cls):
         """Validate required configuration."""
         errors = []
-        if cls.LLM_PROVIDER not in ('openai', 'azure', 'vertex'):
-            errors.append("LLM_PROVIDER must be one of: openai, azure, vertex")
-        if cls.LLM_PROVIDER == 'azure':
+        if cls.LLM_PROVIDER not in ('openai', 'azure', 'vertex', 'ollama'):
+            errors.append("LLM_PROVIDER must be one of: openai, azure, vertex, ollama")
+        if cls.LLM_PROVIDER == 'ollama':
+            pass  # Ollama needs no credentials; API key is a dummy.
+        elif cls.LLM_PROVIDER == 'azure':
             if not cls.AZURE_OPENAI_ENDPOINT:
                 errors.append("AZURE_OPENAI_ENDPOINT is not configured")
             if not cls.AZURE_OPENAI_API_KEY:
@@ -218,6 +233,24 @@ class Config:
                 errors.append("NEO4J_PASSWORD is not configured")
         else:
             errors.append("GRAPH_BACKEND must be one of: neo4j, graphiti, zep")
-        if not cls.LLM_MODEL_NAME and cls.LLM_PROVIDER != 'azure':
+        if not cls.LLM_MODEL_NAME and cls.LLM_PROVIDER not in ('azure', 'ollama'):
             errors.append("LLM_MODEL_NAME is not configured")
+        ws = cls.WEB_SEARCH_PROVIDER
+        if ws and ws not in ('vertex_gemini', 'keiro', 'none'):
+            errors.append("WEB_SEARCH_PROVIDER must be one of: vertex_gemini, keiro, none")
+        if ws == 'keiro' and not cls.KEIRO_API_KEY:
+            errors.append("KEIRO_API_KEY is required when WEB_SEARCH_PROVIDER=keiro")
         return errors
+
+
+# Resolve WEB_SEARCH_PROVIDER default after class body so we can reference
+# other Config attributes that are set during class creation.
+if not Config._raw_web_search_provider:
+    _vertex_ws_possible = (
+        Config.LLM_USE_VERTEX_AI
+        and bool((Config.VERTEX_AI_PROJECT_ID or '').strip())
+        and bool((Config.VERTEX_AI_LOCATION or '').strip())
+    )
+    Config.WEB_SEARCH_PROVIDER = 'vertex_gemini' if _vertex_ws_possible else 'none'
+else:
+    Config.WEB_SEARCH_PROVIDER = Config._raw_web_search_provider

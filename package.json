@@ -1,7 +1,7 @@
 {
   "name": "mirofish",
   "version": "0.1.0",
-  "description": "MiroFish - 简洁通用的群体智能引擎，预测万物",
+  "description": "MiroFish - Swarm-intelligence prediction engine",
   "scripts": {
     "setup": "npm install && cd frontend && npm install",
     "setup:backend": "cd backend && uv sync",
@@ -16,7 +16,10 @@
     "backend": "cd backend && uv run python run.py",
     "frontend": "cd frontend && npm run dev",
     "build": "cd frontend && npm run build",
-    "verify:gemini": "cd backend && uv run python scripts/verify_gemini_vertex.py"
+    "verify:gemini": "cd backend && uv run python scripts/verify_gemini_vertex.py",
+    "verify:ollama": "cd backend && uv run python scripts/verify_ollama.py",
+    "verify:keiro": "cd backend && uv run python scripts/verify_keiro.py",
+    "setup:ollama": "bash scripts/setup-ollama.sh"
   },
   "devDependencies": {
     "concurrently": "^9.1.2"

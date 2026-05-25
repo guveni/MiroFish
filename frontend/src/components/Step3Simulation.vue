@@ -439,6 +439,48 @@ const doStartSimulation = async () => {
   }
 }
 
+const resumeOrStart = async () => {
+  if (!props.simulationId) {
+    addLog(t('log.errorMissingSimId'))
+    return
+  }
+
+  try {
+    const res = await getRunStatus(props.simulationId)
+    if (res.success && res.data) {
+      const status = res.data.runner_status
+
+      if (status === 'running') {
+        addLog('Reconnecting to running simulation...')
+        runStatus.value = res.data
+        phase.value = 1
+        emit('update-status', 'processing')
+        prevTwitterRound.value = res.data.twitter_current_round || 0
+        prevRedditRound.value = res.data.reddit_current_round || 0
+        await fetchRunStatusDetail()
+        startStatusPolling()
+        startDetailPolling()
+        return
+      }
+
+      if (status === 'completed' || status === 'stopped') {
+        addLog('Loading completed simulation results...')
+        runStatus.value = res.data
+        phase.value = 2
+        emit('update-status', 'completed')
+        prevTwitterRound.value = res.data.twitter_current_round || 0
+        prevRedditRound.value = res.data.reddit_current_round || 0
+        await fetchRunStatusDetail()
+        return
+      }
+    }
+  } catch (err) {
+    addLog(`Status check failed, starting fresh: ${err.message}`)
+  }
+
+  doStartSimulation()
+}
+
 // 停止模拟
 const handleStopSimulation = async () => {
   if (!props.simulationId) return
@@ -701,7 +743,7 @@ watch(() => props.systemLogs?.length, () => {
 onMounted(() => {
   addLog(t('log.step3Init'))
   if (props.simulationId) {
-    doStartSimulation()
+    resumeOrStart()
   }
 })
 

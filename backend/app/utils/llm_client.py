@@ -133,7 +133,7 @@ def parse_llm_json_response(text: str) -> Dict[str, Any]:
 
 
 class LLMClient:
-    """Small OpenAI-compatible facade for OpenAI, Azure OpenAI, and Vertex."""
+    """Small OpenAI-compatible facade for OpenAI, Azure OpenAI, Vertex, and Ollama."""
     
     def __init__(
         self,
@@ -144,10 +144,18 @@ class LLMClient:
         self.provider = (Config.LLM_PROVIDER or "openai").strip().lower()
         self._vertex = self.provider == "vertex" or is_vertex_ai_enabled()
         self._azure = self.provider == "azure"
-        resolved_base = base_url or (
-            effective_llm_base_url() if self._vertex else None
-        ) or (None if self._azure else Config.LLM_BASE_URL)
+        self._ollama = self.provider == "ollama"
+
+        if self._ollama:
+            resolved_base = base_url or Config.OLLAMA_BASE_URL
+        elif self._vertex:
+            resolved_base = base_url or effective_llm_base_url()
+        elif self._azure:
+            resolved_base = None
+        else:
+            resolved_base = base_url or Config.LLM_BASE_URL
         self.base_url = resolved_base
+
         self.model = model or (
             Config.AZURE_OPENAI_DEPLOYMENT
             if self._azure
@@ -155,8 +163,8 @@ class LLMClient:
         )
         self.api_key = api_key
 
-        if self.provider not in ("openai", "azure", "vertex"):
-            raise ValueError("LLM_PROVIDER must be one of: openai, azure, vertex")
+        if self.provider not in ("openai", "azure", "vertex", "ollama"):
+            raise ValueError("LLM_PROVIDER must be one of: openai, azure, vertex, ollama")
 
         if self._azure:
             if not Config.AZURE_OPENAI_ENDPOINT:
@@ -165,6 +173,8 @@ class LLMClient:
                 raise ValueError("AZURE_OPENAI_API_KEY is not configured")
             if not self.model:
                 raise ValueError("AZURE_OPENAI_DEPLOYMENT is not configured")
+        elif self._ollama:
+            pass  # Ollama needs no API key; dummy value used below.
         elif not self._vertex and not (self.api_key or Config.LLM_API_KEY):
             raise ValueError("LLM_API_KEY is not configured")
 
@@ -190,17 +200,14 @@ class LLMClient:
                 azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
                 api_version=Config.AZURE_OPENAI_API_VERSION,
             )
-        elif not self._vertex:
+        elif self._ollama or not self._vertex:
+            key = self.api_key or ("ollama" if self._ollama else Config.LLM_API_KEY)
             self.client = wrap_openai_client(
-                OpenAI(
-                    api_key=self.api_key or Config.LLM_API_KEY,
-                    base_url=self.base_url,
-                ),
+                OpenAI(api_key=key, base_url=self.base_url),
                 model=self.model,
             )
             self.async_client = AsyncOpenAI(
-                api_key=self.api_key or Config.LLM_API_KEY,
-                base_url=self.base_url,
+                api_key=key, base_url=self.base_url,
             )
 
     def _active_client(self) -> OpenAI:
@@ -228,6 +235,7 @@ class LLMClient:
         response_format: Optional[Dict] = None
     ) -> str:
         """Send a chat completion request and return text content."""
+        import time
         actual_max_tokens = max_tokens if max_tokens is not None else Config.LLM_CHAT_MAX_TOKENS
         kwargs = {
             "model": self.model,
@@ -239,15 +247,27 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
         
+        prompt_len = sum(len(m.get("content", "")) for m in messages)
+        logger.info(f"[LLM] Sending request to {self.provider}:{self.model} (prompt length ~{prompt_len} chars, response_format={response_format})")
+        start_time = time.time()
+        
         def _complete():
             client = self._active_client()
             return client.chat.completions.create(**kwargs)
 
-        response = run_pipeline_step(
-            f"llm_chat_{self.provider}_{self.model}",
-            _complete,
-            retry_unknown_errors=False,
-        )
+        try:
+            response = run_pipeline_step(
+                f"llm_chat_{self.provider}_{self.model}",
+                _complete,
+                retry_unknown_errors=False,
+            )
+            elapsed = time.time() - start_time
+            logger.info(f"[LLM] Received response from {self.provider}:{self.model} in {elapsed:.2f}s")
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"[LLM] Request failed on {self.provider}:{self.model} in {elapsed:.2f}s: {e}")
+            raise
+
         if not response.choices:
             raise ValueError("LLM returned no choices")
         choice = response.choices[0]
@@ -271,6 +291,7 @@ class LLMClient:
         response_format: Optional[Dict] = None
     ) -> str:
         """Async chat completion request returning text content."""
+        import time
         actual_max_tokens = max_tokens if max_tokens is not None else Config.LLM_CHAT_MAX_TOKENS
         kwargs = {
             "model": self.model,
@@ -282,15 +303,27 @@ class LLMClient:
         if response_format:
             kwargs["response_format"] = response_format
 
+        prompt_len = sum(len(m.get("content", "")) for m in messages)
+        logger.info(f"[LLM] Sending async request to {self.provider}:{self.model} (prompt length ~{prompt_len} chars, response_format={response_format})")
+        start_time = time.time()
+
         async def _complete():
             client = self._active_async_client()
             return await client.chat.completions.create(**kwargs)
 
-        response = await run_pipeline_step_async(
-            f"llm_chat_{self.provider}_{self.model}",
-            _complete,
-            retry_unknown_errors=False,
-        )
+        try:
+            response = await run_pipeline_step_async(
+                f"llm_chat_{self.provider}_{self.model}",
+                _complete,
+                retry_unknown_errors=False,
+            )
+            elapsed = time.time() - start_time
+            logger.info(f"[LLM] Received async response from {self.provider}:{self.model} in {elapsed:.2f}s")
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"[LLM] Async request failed on {self.provider}:{self.model} in {elapsed:.2f}s: {e}")
+            raise
+
         if not response.choices:
             raise ValueError("LLM returned no choices")
         choice = response.choices[0]
