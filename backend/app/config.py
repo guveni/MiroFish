@@ -86,6 +86,19 @@ class Config:
     LLM_JSON_MAX_TOKENS = int(os.environ.get('LLM_JSON_MAX_TOKENS', '8192'))
     LLM_CHAT_MAX_TOKENS = int(os.environ.get('LLM_CHAT_MAX_TOKENS', '8192'))
 
+    # Composer LLM settings (optional second LLM used only for composing the final report markdown)
+    REPORT_USE_COMPOSER = os.environ.get('REPORT_USE_COMPOSER', '').strip().lower() in ('1', 'true', 'yes', 'on')
+    COMPOSER_LLM_PROVIDER = (os.environ.get('COMPOSER_LLM_PROVIDER') or '').strip().lower()
+    COMPOSER_LLM_API_KEY = os.environ.get('COMPOSER_LLM_API_KEY')
+    COMPOSER_LLM_BASE_URL = os.environ.get('COMPOSER_LLM_BASE_URL')
+    COMPOSER_LLM_MODEL_NAME = (os.environ.get('COMPOSER_LLM_MODEL_NAME') or '').strip()
+    COMPOSER_LLM_VERTEX_PROJECT_ID = os.environ.get('COMPOSER_LLM_VERTEX_PROJECT_ID', '')
+    COMPOSER_LLM_VERTEX_LOCATION = (os.environ.get('COMPOSER_LLM_VERTEX_LOCATION') or '').strip()
+
+    # Report-side web search settings
+    REPORT_PREFETCH_WEB_SEARCH = os.environ.get('REPORT_PREFETCH_WEB_SEARCH', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+    REPORT_PREFETCH_MAX_QUERIES = int(os.environ.get('REPORT_PREFETCH_MAX_QUERIES', '4'))
+
     # Gemini (Vertex) web search grounding via Google Search, not Discovery Engine.
     # Requires VERTEX_AI_PROJECT_ID or GOOGLE_CLOUD_PROJECT plus VERTEX_AI_LOCATION; uses ADC.
     # When GEMINI_WEB_SEARCH_MODEL is unset, reuse LLM_MODEL_NAME only for Vertex Gemini models.
@@ -240,6 +253,22 @@ class Config:
             errors.append("WEB_SEARCH_PROVIDER must be one of: vertex_gemini, keiro, none")
         if ws == 'keiro' and not cls.KEIRO_API_KEY:
             errors.append("KEIRO_API_KEY is required when WEB_SEARCH_PROVIDER=keiro")
+        if cls.REPORT_USE_COMPOSER:
+            if not cls.COMPOSER_LLM_PROVIDER:
+                errors.append("COMPOSER_LLM_PROVIDER must be configured when REPORT_USE_COMPOSER is true")
+            elif cls.COMPOSER_LLM_PROVIDER not in ('openai', 'azure', 'vertex', 'ollama'):
+                errors.append("COMPOSER_LLM_PROVIDER must be one of: openai, azure, vertex, ollama")
+            if cls.COMPOSER_LLM_PROVIDER == 'azure':
+                if not cls.COMPOSER_LLM_BASE_URL and not cls.AZURE_OPENAI_ENDPOINT:
+                    errors.append("AZURE_OPENAI_ENDPOINT or COMPOSER_LLM_BASE_URL must be configured for Azure composer")
+            elif cls.COMPOSER_LLM_PROVIDER == 'vertex':
+                proj = cls.COMPOSER_LLM_VERTEX_PROJECT_ID or cls.VERTEX_AI_PROJECT_ID or os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCP_PROJECT')
+                loc = cls.COMPOSER_LLM_VERTEX_LOCATION or cls.VERTEX_AI_LOCATION
+                if not proj or not loc:
+                    errors.append("Vertex AI composer requires VERTEX_AI_PROJECT_ID/COMPOSER_LLM_VERTEX_PROJECT_ID and VERTEX_AI_LOCATION/COMPOSER_LLM_VERTEX_LOCATION")
+            elif cls.COMPOSER_LLM_PROVIDER == 'openai':
+                if not cls.COMPOSER_LLM_API_KEY and not cls.LLM_API_KEY:
+                    errors.append("LLM_API_KEY or COMPOSER_LLM_API_KEY is not configured for OpenAI composer")
         return errors
 
 

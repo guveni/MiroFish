@@ -135,84 +135,117 @@ def parse_llm_json_response(text: str) -> Dict[str, Any]:
 class LLMClient:
     """Small OpenAI-compatible facade for OpenAI, Azure OpenAI, Vertex, and Ollama."""
     
+    @classmethod
+    def for_composer(cls) -> "LLMClient":
+        """Factory method to build a composer-specific LLMClient, or fallback to the primary one."""
+        if not Config.REPORT_USE_COMPOSER or not Config.COMPOSER_LLM_PROVIDER:
+            return cls()
+        return cls(
+            provider=Config.COMPOSER_LLM_PROVIDER,
+            api_key=Config.COMPOSER_LLM_API_KEY or None,
+            base_url=Config.COMPOSER_LLM_BASE_URL or None,
+            model=Config.COMPOSER_LLM_MODEL_NAME or None,
+        )
+
     def __init__(
         self,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
-        model: Optional[str] = None
+        model: Optional[str] = None,
+        provider: Optional[str] = None
     ):
-        self.provider = (Config.LLM_PROVIDER or "openai").strip().lower()
-        self._vertex = self.provider == "vertex" or is_vertex_ai_enabled()
+        self.provider = (provider or Config.LLM_PROVIDER or "openai").strip().lower()
+        if provider:
+            self._vertex = self.provider == "vertex"
+        else:
+            self._vertex = self.provider == "vertex" or is_vertex_ai_enabled()
         self._azure = self.provider == "azure"
         self._ollama = self.provider == "ollama"
 
         if self._ollama:
             resolved_base = base_url or Config.OLLAMA_BASE_URL
         elif self._vertex:
-            resolved_base = base_url or effective_llm_base_url()
+            if base_url:
+                resolved_base = base_url
+            else:
+                import os
+                composer_project = os.environ.get("COMPOSER_LLM_VERTEX_PROJECT_ID") or (Config.COMPOSER_LLM_VERTEX_PROJECT_ID if hasattr(Config, "COMPOSER_LLM_VERTEX_PROJECT_ID") else None)
+                composer_location = os.environ.get("COMPOSER_LLM_VERTEX_LOCATION") or (Config.COMPOSER_LLM_VERTEX_LOCATION if hasattr(Config, "COMPOSER_LLM_VERTEX_LOCATION") else None)
+                
+                project = composer_project or os.environ.get("VERTEX_AI_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
+                location = composer_location or os.environ.get("VERTEX_AI_LOCATION") or ""
+                
+                if project and location:
+                    loc = location.lower().strip()
+                    api_version = os.environ.get("VERTEX_AI_OPENAI_API_VERSION", "v1").strip().lstrip("/")
+                    if api_version not in ("v1", "v1beta1"):
+                        api_version = "v1"
+                    if loc == "global":
+                        resolved_base = f"https://aiplatform.googleapis.com/{api_version}/projects/{project}/locations/global/endpoints/openapi"
+                    else:
+                        resolved_base = f"https://{loc}-aiplatform.googleapis.com/{api_version}/projects/{project}/locations/{loc}/endpoints/openapi"
+                else:
+                    resolved_base = effective_llm_base_url()
         elif self._azure:
-            resolved_base = None
+            resolved_base = base_url or None
         else:
             resolved_base = base_url or Config.LLM_BASE_URL
         self.base_url = resolved_base
 
         self.model = model or (
-            Config.AZURE_OPENAI_DEPLOYMENT
-            if self._azure
-            else Config.require_llm_model_name()
+            (Config.COMPOSER_LLM_MODEL_NAME if self.provider == Config.COMPOSER_LLM_PROVIDER and hasattr(Config, "COMPOSER_LLM_MODEL_NAME") and Config.COMPOSER_LLM_MODEL_NAME else (Config.AZURE_OPENAI_DEPLOYMENT if self._azure else Config.require_llm_model_name()))
         )
         self.api_key = api_key
 
         if self.provider not in ("openai", "azure", "vertex", "ollama"):
-            raise ValueError("LLM_PROVIDER must be one of: openai, azure, vertex, ollama")
+            raise ValueError(f"LLM provider {self.provider} must be one of: openai, azure, vertex, ollama")
+
+        self.client = None
+        self.async_client = None
 
         if self._azure:
-            if not Config.AZURE_OPENAI_ENDPOINT:
-                raise ValueError("AZURE_OPENAI_ENDPOINT is not configured")
-            if not (self.api_key or Config.AZURE_OPENAI_API_KEY):
-                raise ValueError("AZURE_OPENAI_API_KEY is not configured")
-            if not self.model:
-                raise ValueError("AZURE_OPENAI_DEPLOYMENT is not configured")
-        elif self._ollama:
-            pass  # Ollama needs no API key; dummy value used below.
-        elif not self._vertex and not (self.api_key or Config.LLM_API_KEY):
-            raise ValueError("LLM_API_KEY is not configured")
+            endpoint = base_url or (Config.COMPOSER_LLM_BASE_URL if hasattr(Config, "COMPOSER_LLM_BASE_URL") and Config.COMPOSER_LLM_BASE_URL else Config.AZURE_OPENAI_ENDPOINT)
+            key = api_key or (Config.COMPOSER_LLM_API_KEY if hasattr(Config, "COMPOSER_LLM_API_KEY") and Config.COMPOSER_LLM_API_KEY else Config.AZURE_OPENAI_API_KEY)
+            deployment = self.model
+            
+            if not endpoint:
+                raise ValueError("AZURE_OPENAI_ENDPOINT or COMPOSER_LLM_BASE_URL is not configured")
+            if not key:
+                raise ValueError("AZURE_OPENAI_API_KEY or COMPOSER_LLM_API_KEY is not configured")
+            if not deployment:
+                raise ValueError("AZURE_OPENAI_DEPLOYMENT or COMPOSER_LLM_MODEL_NAME is not configured")
 
-        if self._vertex and not vertex_config_present():
-            raise ValueError(
-                "Vertex AI OpenAPI base URL could not be resolved. Check "
-                "VERTEX_AI_PROJECT_ID / VERTEX_AI_LOCATION or LLM_BASE_URL."
-            )
-
-        self.client: Optional[OpenAI] = None
-        self.async_client: Optional[AsyncOpenAI] = None
-        if self._azure:
             self.client = wrap_openai_client(
                 AzureOpenAI(
-                    api_key=self.api_key or Config.AZURE_OPENAI_API_KEY,
-                    azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
+                    api_key=key,
+                    azure_endpoint=endpoint,
                     api_version=Config.AZURE_OPENAI_API_VERSION,
                 ),
-                model=self.model,
+                model=deployment,
             )
             self.async_client = AsyncAzureOpenAI(
-                api_key=self.api_key or Config.AZURE_OPENAI_API_KEY,
-                azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
+                api_key=key,
+                azure_endpoint=endpoint,
                 api_version=Config.AZURE_OPENAI_API_VERSION,
             )
         elif self._ollama or not self._vertex:
-            key = self.api_key or ("ollama" if self._ollama else Config.LLM_API_KEY)
+            key = self.api_key or (Config.COMPOSER_LLM_API_KEY if hasattr(Config, "COMPOSER_LLM_API_KEY") and Config.COMPOSER_LLM_API_KEY and provider else ("ollama" if self._ollama else Config.LLM_API_KEY))
+            
+            if self.provider == "openai" and not key:
+                raise ValueError("LLM_API_KEY or COMPOSER_LLM_API_KEY is not configured")
+                
             self.client = wrap_openai_client(
-                OpenAI(api_key=key, base_url=self.base_url),
+                OpenAI(api_key=key or "ollama", base_url=self.base_url),
                 model=self.model,
             )
             self.async_client = AsyncOpenAI(
-                api_key=key, base_url=self.base_url,
+                api_key=key or "ollama", base_url=self.base_url,
             )
 
     def _active_client(self) -> OpenAI:
         if self._vertex:
-            key = effective_llm_api_key_or_vertex_token(self.api_key)
+            from .vertex_openai import get_vertex_access_token
+            key = get_vertex_access_token()
             return wrap_openai_client(
                 OpenAI(api_key=key, base_url=self.base_url),
                 model=self.model,
@@ -222,7 +255,8 @@ class LLMClient:
 
     def _active_async_client(self) -> AsyncOpenAI:
         if self._vertex:
-            key = effective_llm_api_key_or_vertex_token(self.api_key)
+            from .vertex_openai import get_vertex_access_token
+            key = get_vertex_access_token()
             return AsyncOpenAI(api_key=key, base_url=self.base_url)
         assert self.async_client is not None
         return self.async_client

@@ -270,12 +270,26 @@
     </div>
 
     <!-- Bottom Info / Logs -->
-    <div class="system-logs">
-      <div class="log-header">
-        <span class="log-title">SIMULATION MONITOR</span>
+    <div class="system-logs" :class="{ 'is-collapsed': isMonitorCollapsed }">
+      <div class="log-header" @click="isMonitorCollapsed = !isMonitorCollapsed" style="cursor: pointer; user-select: none;">
+        <div class="log-title-container">
+          <span class="log-title">SIMULATION MONITOR</span>
+          <svg 
+            class="console-collapse-icon" 
+            :class="{ 'is-collapsed': isMonitorCollapsed }"
+            viewBox="0 0 24 24" 
+            width="12" 
+            height="12" 
+            fill="none" 
+            stroke="currentColor" 
+            stroke-width="2"
+          >
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </div>
         <span class="log-id">{{ simulationId || 'NO_SIMULATION' }}</span>
       </div>
-      <div class="log-content" ref="logContent">
+      <div v-show="!isMonitorCollapsed" class="log-content" ref="logContent">
         <div class="log-line" v-for="(log, idx) in systemLogs" :key="idx">
           <span class="log-time">{{ log.time }}</span>
           <span class="log-msg">{{ log.msg }}</span>
@@ -732,12 +746,24 @@ watch(phase, (newPhase) => {
 
 // Scroll log to bottom
 const logContent = ref(null)
+const isMonitorCollapsed = ref(false)
+
 watch(() => props.systemLogs?.length, () => {
   nextTick(() => {
     if (logContent.value) {
       logContent.value.scrollTop = logContent.value.scrollHeight
     }
   })
+})
+
+watch(isMonitorCollapsed, (newVal) => {
+  if (!newVal) {
+    nextTick(() => {
+      if (logContent.value) {
+        logContent.value.scrollTop = logContent.value.scrollHeight
+      }
+    })
+  }
 })
 
 onMounted(() => {
@@ -1271,6 +1297,7 @@ onUnmounted(() => {
   font-family: 'JetBrains Mono', monospace;
   border-top: 1px solid #222;
   flex-shrink: 0;
+  transition: padding 0.3s ease;
 }
 
 .log-header {
@@ -1281,6 +1308,43 @@ onUnmounted(() => {
   margin-bottom: 8px;
   font-size: 10px;
   color: #666;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.2s ease, border-color 0.3s ease, margin-bottom 0.3s ease, padding-bottom 0.3s ease;
+}
+
+.log-header:hover {
+  color: #999;
+}
+
+.log-title-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.console-collapse-icon {
+  color: #666;
+  transition: transform 0.3s ease, color 0.2s ease;
+  flex-shrink: 0;
+}
+
+.console-collapse-icon.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.log-header:hover .console-collapse-icon {
+  color: #999;
+}
+
+.system-logs.is-collapsed {
+  padding: 10px 16px;
+}
+
+.system-logs.is-collapsed .log-header {
+  border-bottom: 1px solid transparent;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
 .log-content {

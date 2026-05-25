@@ -647,7 +647,10 @@
     "reportSaved": "Report saved: {reportId}",
     "reportFolderDeleted": "Report folder deleted: {reportId}",
     "redirectToQuickSearch": "search_graph redirected to quick_search",
-    "redirectToInsightForge": "get_simulation_context redirected to insight_forge"
+    "redirectToInsightForge": "get_simulation_context redirected to insight_forge",
+    "toolWebSearch": "web_search tool called: {query}",
+    "prefetchStart": "Starting report-level web search pre-fetch...",
+    "composerHandoff": "Handing off draft to Composer LLM for polishing: {title}"
   },
   "console": {
     "zepToolsInitialized": "Graph tools service initialized",

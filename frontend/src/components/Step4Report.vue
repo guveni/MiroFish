@@ -416,12 +416,26 @@
     </div>
 
     <!-- Bottom Console Logs -->
-    <div class="console-logs">
-      <div class="log-header">
-        <span class="log-title">CONSOLE OUTPUT</span>
+    <div class="console-logs" :class="{ 'is-collapsed': isConsoleCollapsed }">
+      <div class="log-header" @click="isConsoleCollapsed = !isConsoleCollapsed" style="cursor: pointer; user-select: none;">
+        <div class="log-title-container">
+          <span class="log-title">CONSOLE OUTPUT</span>
+          <svg 
+            class="console-collapse-icon" 
+            :class="{ 'is-collapsed': isConsoleCollapsed }"
+            viewBox="0 0 24 24" 
+            width="12" 
+            height="12" 
+            fill="none" 
+            stroke="currentColor" 
+            stroke-width="2"
+          >
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </div>
         <span class="log-id">{{ reportId || 'NO_REPORT' }}</span>
       </div>
-      <div class="log-content" ref="logContent">
+      <div v-show="!isConsoleCollapsed" class="log-content" ref="logContent">
         <div class="log-line" v-for="(log, idx) in consoleLogs" :key="idx">
           <span class="log-msg" :class="getLogLevelClass(log)">{{ log }}</span>
         </div>
@@ -477,6 +491,7 @@ const leftPanel = ref(null)
 const rightPanel = ref(null)
 const logContent = ref(null)
 const showRawResult = reactive({})
+const isConsoleCollapsed = ref(false)
 
 // Toggle functions
 const toggleFocusMode = () => {
@@ -2341,6 +2356,16 @@ watch(() => props.reportId, (newId) => {
     startPolling()
   }
 }, { immediate: true })
+
+watch(isConsoleCollapsed, (newVal) => {
+  if (!newVal) {
+    nextTick(() => {
+      if (logContent.value) {
+        logContent.value.scrollTop = logContent.value.scrollHeight
+      }
+    })
+  }
+})
 </script>
 
 <style scoped>
@@ -5385,6 +5410,7 @@ watch(() => props.reportId, (newId) => {
   font-family: 'JetBrains Mono', monospace;
   border-top: 1px solid #222;
   flex-shrink: 0;
+  transition: padding 0.3s ease;
 }
 
 .log-header {
@@ -5395,6 +5421,43 @@ watch(() => props.reportId, (newId) => {
   margin-bottom: 8px;
   font-size: 10px;
   color: #666;
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.2s ease, border-color 0.3s ease, margin-bottom 0.3s ease, padding-bottom 0.3s ease;
+}
+
+.log-header:hover {
+  color: #999;
+}
+
+.log-title-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.console-collapse-icon {
+  color: #666;
+  transition: transform 0.3s ease, color 0.2s ease;
+  flex-shrink: 0;
+}
+
+.console-collapse-icon.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.log-header:hover .console-collapse-icon {
+  color: #999;
+}
+
+.console-logs.is-collapsed {
+  padding: 10px 16px;
+}
+
+.console-logs.is-collapsed .log-header {
+  border-bottom: 1px solid transparent;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
 .log-title {
