@@ -9,7 +9,7 @@ import os
 import json
 import time
 import re
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -334,6 +334,759 @@ class ReportConsoleLogger:
         self.close()
 
 
+# ═══════════════════════════════════════════════════════════════
+# Temporal relevance filter
+# ═══════════════════════════════════════════════════════════════
+
+class FreshnessClass(str, Enum):
+    """How time-sensitive a topic is."""
+    HIGH = "high"      # markets, news, prices, politics, laws, product specs
+    MEDIUM = "medium"  # company strategy, analyst views, regulations
+    LOW = "low"        # historical / background facts
+
+
+@dataclass
+class TemporalAnnotation:
+    dates_found: List[str]
+    freshness_class: FreshnessClass
+    freshness_score: float   # 0.0 (very stale) → 1.0 (fresh / undated)
+    staleness_warning: Optional[str]
+    header: str              # pre-formatted text to prepend to the tool result
+
+
+class TemporalRelevanceFilter:
+    """
+    Sits between tool retrieval and LLM synthesis.
+
+    For each tool result it:
+      1. Extracts all recognisable source/event dates.
+      2. Classifies the topic's freshness requirement.
+      3. Scores how fresh the retrieved content is.
+      4. Prepends a compact Temporal Context header so the LLM can
+         cite "as of [date]", flag stale sources, and resolve conflicts.
+    """
+
+    # Keywords that signal a high-freshness topic
+    _HIGH_KW = {
+        "market", "price", "stock", "bond", "crypto", "currency", "forex",
+        "news", "breaking", "election", "vote", "politics", "political",
+        "law", "legislation", "bill", "policy", "sanction", "tariff", "trade",
+        "product", "launch", "release", "spec", "specification",
+        "crisis", "conflict", "war", "pandemic", "outbreak", "disaster",
+        "inflation", "interest rate", "gdp", "earnings", "quarterly", "ipo",
+        "regulation", "fda", "sec", "ban",
+    }
+
+    # Keywords that signal a medium-freshness topic
+    _MEDIUM_KW = {
+        "strategy", "roadmap", "analyst", "forecast", "outlook",
+        "corporate", "company", "merger", "acquisition", "partnership",
+        "executive", "ceo", "leadership", "restructure",
+        "survey", "report", "study", "trend", "sentiment",
+    }
+
+    # Compiled date patterns (ordered most-specific first)
+    _RE_ISO_FULL    = re.compile(r'\b(20\d{2})[-/](0[1-9]|1[0-2])[-/](0[1-9]|[12]\d|3[01])\b')
+    _RE_ISO_YM      = re.compile(r'\b(20\d{2})[-/](0[1-9]|1[0-2])\b')
+    _RE_MONTH_YEAR  = re.compile(
+        r'\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+(20\d{2})\b',
+        re.IGNORECASE,
+    )
+    _RE_YEAR_ONLY   = re.compile(r'\b(20[12]\d)\b')
+
+    # Map 3-letter month abbreviations to numbers
+    _MONTH_MAP = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "june": 6, "july": 7, "august": 8, "september": 9,
+        "october": 10, "november": 11, "december": 12,
+    }
+
+    # Staleness thresholds in days per freshness class
+    _THRESHOLDS = {
+        FreshnessClass.HIGH:   [(30, 0.9, None), (90, 0.6, "aging"), (365, 0.4, "outdated"), (None, 0.1, "stale")],
+        FreshnessClass.MEDIUM: [(180, 0.9, None), (365, 0.6, "aging"), (730, 0.4, "outdated"), (None, 0.2, "stale")],
+        FreshnessClass.LOW:    [(1825, 0.9, None), (3650, 0.6, "aging"), (None, 0.3, "old")],
+    }
+
+    # ── Public API ──────────────────────────────────────────────
+
+    def classify_topic(self, text: str) -> FreshnessClass:
+        """Return freshness class for the combined topic text."""
+        lower = text.lower()
+        if any(kw in lower for kw in self._HIGH_KW):
+            return FreshnessClass.HIGH
+        if any(kw in lower for kw in self._MEDIUM_KW):
+            return FreshnessClass.MEDIUM
+        return FreshnessClass.LOW
+
+    def extract_dates(self, text: str) -> List[datetime]:
+        """
+        Extract all recognisable dates from text.
+        Returns a list of datetime objects sorted newest-first.
+        """
+        found: set[datetime] = set()
+
+        for m in self._RE_ISO_FULL.finditer(text):
+            try:
+                found.add(datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+            except ValueError:
+                pass
+
+        for m in self._RE_MONTH_YEAR.finditer(text):
+            month_num = self._MONTH_MAP.get(m.group(1).lower()[:3])
+            if month_num:
+                try:
+                    found.add(datetime(int(m.group(2)), month_num, 1))
+                except ValueError:
+                    pass
+
+        for m in self._RE_ISO_YM.finditer(text):
+            try:
+                found.add(datetime(int(m.group(1)), int(m.group(2)), 1))
+            except ValueError:
+                pass
+
+        # Year-only as a fallback when nothing more specific is found
+        if not found:
+            for m in self._RE_YEAR_ONLY.finditer(text):
+                yr = int(m.group(1))
+                if 2010 <= yr <= 2035:
+                    try:
+                        found.add(datetime(yr, 1, 1))
+                    except ValueError:
+                        pass
+
+        return sorted(found, reverse=True)
+
+    def score_freshness(
+        self, dates: List[datetime], freshness_class: FreshnessClass
+    ) -> Tuple[float, Optional[str]]:
+        """
+        Return (score 0..1, warning_message or None).
+        Score is 0.7 (neutral) when no dates are found.
+        """
+        if not dates:
+            return 0.7, None
+
+        now = datetime.now()
+        days_old = (now - dates[0]).days
+
+        for max_days, score, label in self._THRESHOLDS[freshness_class]:
+            if max_days is None or days_old <= max_days:
+                warning = None
+                if label:
+                    approx = f"~{days_old // 365}y" if days_old >= 365 else f"~{days_old}d"
+                    warning = f"⚠️ SOURCE {label.upper()} ({approx} old) — {freshness_class.value}-freshness topic; verify with current data."
+                return score, warning
+
+        # Should never reach here, but be safe
+        return 0.1, "⚠️ SOURCE VERY STALE — treat with caution."
+
+    def annotate(
+        self,
+        raw_result: str,
+        simulation_requirement: str,
+        section_title: str,
+        tool_name: str,
+    ) -> str:
+        """
+        Prepend a Temporal Context block to a raw tool result.
+        The block tells the LLM how fresh the data is and what to do about it.
+        """
+        topic_text = f"{simulation_requirement} {section_title}"
+        fc = self.classify_topic(topic_text)
+        dates = self.extract_dates(raw_result)
+        score, warning = self.score_freshness(dates, fc)
+
+        lines = [f"[Temporal Context — {tool_name}]"]
+        lines.append(f"Freshness requirement: {fc.value.upper()}  |  Source freshness score: {score:.1f}/1.0")
+
+        if dates:
+            date_strs = [d.strftime("%Y-%m-%d") for d in dates[:5]]
+            lines.append(f"Dates found: {', '.join(date_strs)}")
+            lines.append(f"Most recent: {dates[0].strftime('%Y-%m-%d')}")
+        else:
+            lines.append("Dates found: none detected in this source")
+
+        if warning:
+            lines.append(warning)
+
+        lines += [
+            "Synthesis rules for this source:",
+            "  • Cite key claims with 'as of [date]' when a date is available.",
+            "  • If this source conflicts with a newer source, prefer the newer one and note the discrepancy.",
+            "  • If the source is stale for a high-freshness topic, flag this limitation in your analysis.",
+            "---",
+        ]
+
+        header = "\n".join(lines)
+        return f"{header}\n\n{raw_result}"
+
+    def build_annotation(
+        self,
+        raw_result: str,
+        simulation_requirement: str,
+        section_title: str,
+        tool_name: str,
+    ) -> TemporalAnnotation:
+        """Return a structured TemporalAnnotation (useful for logging)."""
+        topic_text = f"{simulation_requirement} {section_title}"
+        fc = self.classify_topic(topic_text)
+        dates = self.extract_dates(raw_result)
+        score, warning = self.score_freshness(dates, fc)
+        date_strs = [d.strftime("%Y-%m-%d") for d in dates[:5]]
+        return TemporalAnnotation(
+            dates_found=date_strs,
+            freshness_class=fc,
+            freshness_score=score,
+            staleness_warning=warning,
+            header=self.annotate(raw_result, simulation_requirement, section_title, tool_name),
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Grounding verifier
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class GroundingReport:
+    """Summary of how well a generated section is anchored to retrieved sources."""
+    total_sources: int
+    cited_sources: List[int]         # [SN] numbers found in the draft
+    uncited_sources: List[int]       # retrieved sources the LLM never cited
+    grounding_score: float           # cited / total (0–1)
+    high_risk_sentences: List[str]   # factual sentences without a nearby citation
+    warning: Optional[str]
+    summary: str
+
+
+class GroundingVerifier:
+    """
+    Heuristic grounding checker — no extra LLM call.
+
+    After the LLM writes a section, it checks:
+    1. Which numbered sources ([S1] … [SN]) were actually cited.
+    2. Which sentences look factual but carry no citation.
+    3. Produces a score and optional warning that travels to the composer.
+    """
+
+    # Citation pattern: [S1], [S2], [S 3], [s4] …
+    _CITATION_RE = re.compile(r'\[[Ss]\s*(\d+)\]')
+
+    # Sentence-level indicators of a specific factual claim
+    _FACTUAL_RE = re.compile(
+        r'\d[\d,]*\.?\d*\s*%|\b20\d{2}\b|"\w|\b(?:said|stated|reported|claimed|announced|according to)\b|\b(?:increased|decreased|grew|declined|surged|plunged|rose|fell)\b|\$[\d,]+|\b\d+\s+(?:million|billion|thousand)\b',
+        re.IGNORECASE,
+    )
+
+    def check(self, draft: str, total_sources: int) -> GroundingReport:
+        """Analyse citation coverage of *draft* against *total_sources* numbered sources."""
+        if total_sources == 0:
+            return GroundingReport(
+                total_sources=0,
+                cited_sources=[],
+                uncited_sources=[],
+                grounding_score=1.0,
+                high_risk_sentences=[],
+                warning=None,
+                summary="No sources retrieved for this section.",
+            )
+
+        cited_nums = {int(m.group(1)) for m in self._CITATION_RE.finditer(draft)}
+        all_nums = set(range(1, total_sources + 1))
+        cited = sorted(cited_nums & all_nums)
+        uncited = sorted(all_nums - cited_nums)
+        score = len(cited) / total_sources
+
+        # Collect sentences that carry a factual signal but no [SN] tag
+        high_risk: List[str] = []
+        for sent in re.split(r'(?<=[.!?])\s+', draft):
+            sent = sent.strip()
+            if (
+                len(sent) > 30
+                and self._FACTUAL_RE.search(sent)
+                and not self._CITATION_RE.search(sent)
+            ):
+                high_risk.append(sent[:150] + ("…" if len(sent) > 150 else ""))
+                if len(high_risk) >= 5:
+                    break
+
+        if score < 0.5:
+            warning = f"⚠️ LOW GROUNDING: only {len(cited)}/{total_sources} sources cited. Verify claims against observations."
+        elif uncited:
+            warning = f"ℹ️ {len(uncited)} source(s) unused: {', '.join(f'S{n}' for n in uncited)}. Consider whether they contain relevant evidence."
+        else:
+            warning = None
+
+        parts = [f"Grounding {score:.0%} ({len(cited)}/{total_sources} sources cited)"]
+        if uncited:
+            parts.append(f"Uncited: {', '.join(f'S{n}' for n in uncited)}")
+        if high_risk:
+            parts.append(f"Unanchored factual sentences: {len(high_risk)}")
+
+        return GroundingReport(
+            total_sources=total_sources,
+            cited_sources=cited,
+            uncited_sources=uncited,
+            grounding_score=score,
+            high_risk_sentences=high_risk,
+            warning=warning,
+            summary=" | ".join(parts),
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Source Credibility Scorer
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class CredibilityReport:
+    """Credibility metadata score and cross-referenced claims report."""
+    source_weights: Dict[int, str]          # e.g., {1: "HIGH", 2: "MEDIUM"}
+    cross_referenced_claims: List[str]      # sentences citing >=2 sources
+    summary: str
+
+
+class SourceCredibilityScorer:
+    """
+    Assigns epistemic weight to sources based on the tool that retrieved them,
+    and identifies cross-referenced claims in the draft.
+    """
+    _TOOL_WEIGHTS = {
+        "interview_agents": "HIGH",
+        "insight_forge": "HIGH",
+        "panorama_search": "MEDIUM",
+        "quick_search": "MEDIUM",
+        "web_search": "LOW"
+    }
+
+    def check(self, draft: str, sources_metadata: List[Tuple[int, str, str]]) -> CredibilityReport:
+        source_weights = {}
+        for num, tool_name, _ in sources_metadata:
+            source_weights[num] = self._TOOL_WEIGHTS.get(tool_name, "LOW")
+
+        # Find cross-referenced claims
+        cross_referenced = []
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        
+        citation_re = re.compile(r'\[[Ss]\s*(\d+)\]')
+        for sent in re.split(r'(?<=[.!?])\s+', draft_clean):
+            sent = sent.strip()
+            if len(sent) > 20:
+                cited_nums = {int(m.group(1)) for m in citation_re.finditer(sent)}
+                if len(cited_nums) >= 2:
+                    cross_referenced.append(sent[:150] + ("…" if len(sent) > 150 else ""))
+
+        parts = [f"Credibility breakdown: {', '.join(f'S{k}:{v}' for k, v in source_weights.items())}"]
+        if cross_referenced:
+            parts.append(f"Cross-referenced sentences: {len(cross_referenced)}")
+        else:
+            parts.append("No cross-referenced sentences found.")
+
+        return CredibilityReport(
+            source_weights=source_weights,
+            cross_referenced_claims=cross_referenced,
+            summary=" | ".join(parts)
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Contradiction Detector
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class ContradictionReport:
+    """Internal contradictions detection report."""
+    contradictions: List[Tuple[str, int, int, str]]  # (entity, S_a, S_b, reason)
+    warning: Optional[str]
+    summary: str
+
+
+class ContradictionDetector:
+    """
+    Heuristically checks if sentences in the draft have opposing polarity
+    regarding the same entity/concept.
+    """
+    _POS_WORDS = {
+        "rose", "grew", "increased", "upward", "up", "support", "supportive", 
+        "pro", "positive", "increase", "gain", "bullish", "optimistic", "gains",
+        "benefits", "benefit", "boost", "boosted", "improved", "improvement", "success"
+    }
+    _NEG_WORDS = {
+        "fell", "dropped", "declined", "downward", "down", "oppose", "opposing", 
+        "con", "negative", "decrease", "loss", "bearish", "pessimistic", "plunged", 
+        "slumped", "failures", "failure", "damage", "damaged", "hurt", "harmed", "losses"
+    }
+
+    _CITATION_RE = re.compile(r'\[[Ss]\s*(\d+)\]')
+
+    def check(self, draft: str) -> ContradictionReport:
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', draft_clean) if len(s.strip()) > 15]
+
+        stop_words = {
+            "The", "A", "An", "In", "On", "At", "By", "For", "With", "About", "Against", "Through", 
+            "During", "Before", "After", "Under", "Above", "Below", "And", "Or", "But", "If", "Because", 
+            "As", "Until", "While", "Of", "To", "It", "Its", "They", "Their", "We", "Our", "He", "She", 
+            "This", "That", "These", "Those", "S1", "S2", "S3", "S4", "S5", "Final", "Answer", "Note", "Yes", "No",
+            "Based", "According", "Agent", "Agents"
+        }
+
+        entity_data = []  # list of dicts: {"entity": str, "sent": str, "sources": set, "polarity": int}
+
+        for sent in sentences:
+            sources = {int(m.group(1)) for m in self._CITATION_RE.finditer(sent)}
+            if not sources:
+                continue
+
+            words = re.findall(r'\b[A-Z][a-zA-Z0-9_]*\b', sent)
+            entities = set(w for w in words if w not in stop_words and len(w) > 2)
+
+            sent_lower = sent.lower()
+            pos_matches = sum(1 for w in self._POS_WORDS if f" {w} " in f" {sent_lower} " or sent_lower.endswith(w) or sent_lower.startswith(w))
+            neg_matches = sum(1 for w in self._NEG_WORDS if f" {w} " in f" {sent_lower} " or sent_lower.endswith(w) or sent_lower.startswith(w))
+
+            polarity = 0
+            if pos_matches > neg_matches:
+                polarity = 1
+            elif neg_matches > pos_matches:
+                polarity = -1
+
+            if polarity != 0:
+                for ent in entities:
+                    entity_data.append({
+                        "entity": ent,
+                        "sent": sent,
+                        "sources": sources,
+                        "polarity": polarity
+                    })
+
+        contradictions = []
+        for i in range(len(entity_data)):
+            for j in range(i + 1, len(entity_data)):
+                d1 = entity_data[i]
+                d2 = entity_data[j]
+                if d1["entity"] == d2["entity"] and d1["polarity"] != d2["polarity"]:
+                    src_1 = min(d1["sources"])
+                    src_2 = min(d2["sources"])
+                    if src_1 != src_2:
+                        reason = f"Entity '{d1['entity']}' has positive/growth indicators in Sentence A ({src_1}) but negative/decline indicators in Sentence B ({src_2})."
+                        contradictions.append((d1["entity"], src_1, src_2, reason))
+
+        if contradictions:
+            warning = f"⚠️ CONTRADICTION DETECTED: Found opposing claims for: {', '.join(set(c[0] for c in contradictions))}. Resolve conflicting evidence or clarify temporal order."
+            summary = f"Contradictions found: {len(contradictions)}"
+        else:
+            warning = None
+            summary = "No contradictions detected."
+
+        return ContradictionReport(
+            contradictions=contradictions,
+            warning=warning,
+            summary=summary
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Numerical Sanity Checker
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class NumericalSanityReport:
+    """Numerical consistency and range-sanity report."""
+    anomalies: List[str]
+    warning: Optional[str]
+    summary: str
+
+
+class NumericalSanityChecker:
+    """
+    Checks numbers/percentages in the draft for logical consistency, sum rules,
+    and order-of-magnitude alignment with the cited sources.
+    """
+    _CITATION_RE = re.compile(r'\[[Ss]\s*(\d+)\]')
+
+    def check(self, draft: str, sources_metadata: List[Tuple[int, str, str]], module: Optional[Any] = None) -> NumericalSanityReport:
+        anomalies = []
+        if module:
+            # Consume domain-specific sanity checks
+            anomalies.extend(module.check_numerical_sanity(draft, sources_metadata))
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', draft_clean) if len(s.strip()) > 15]
+
+        # 1. Percentage Range and Sum Sanity
+        for sent in sentences:
+            pct_matches = re.findall(r'\b(\d+(?:\.\d+)?)\s*%', sent)
+            if not pct_matches:
+                continue
+
+            pct_vals = [float(v) for v in pct_matches]
+            sent_lower = sent.lower()
+
+            # Individual percentage > 100% check when describing support/proportion/share
+            if any(term in sent_lower for term in ["support", "sentiment", "share", "proportion", "percentage", "rate"]):
+                for val in pct_vals:
+                    if val > 100.0:
+                        anomalies.append(f"Individual percentage {val}% exceeds 100% in a proportional context: '{sent[:80]}...'")
+
+            # Check sums if there are multiple percentages in the sentence
+            if len(pct_vals) >= 2 and any(term in sent_lower for term in ["total", "sum", "combine", "support", "oppose", "neutral"]):
+                total_pct = sum(pct_vals)
+                if any(term in sent_lower for term in ["breakdown", "split", "distribute", "divided"]) or (
+                    any(p in sent_lower for p in ["support", "oppose"]) and any(n in sent_lower for n in ["neutral", "observer"])
+                ):
+                    if total_pct > 105.0 or total_pct < 90.0:
+                        anomalies.append(f"Breakdown percentages sum to {total_pct}% (should be ~100%): '{sent[:80]}...'")
+
+        # 2. Order of Magnitude Mismatch with cited observation
+        sources_dict = {num: (tool, result) for num, tool, result in sources_metadata}
+
+        for sent in sentences:
+            cited_nums = {int(m.group(1)) for m in self._CITATION_RE.finditer(sent)}
+            if not cited_nums:
+                continue
+
+            num_matches = re.finditer(r'\b(\d+(?:\.\d+)?)\s*(%|\bmillion\b|\bbillion\b|\bthousand\b)?', sent, re.IGNORECASE)
+            for nm in num_matches:
+                val_str = nm.group(1)
+                suffix = nm.group(2) or ""
+                suffix = suffix.lower().strip()
+                val = float(val_str)
+
+                if val < 5.0 and not suffix:
+                    continue
+
+                for src_num in cited_nums:
+                    if src_num not in sources_dict:
+                        continue
+                    _, src_text = sources_dict[src_num]
+
+                    if suffix in ["million", "billion", "thousand"]:
+                        src_matches = re.finditer(r'\b' + re.escape(val_str) + r'\b\s*(%|\bmillion\b|\bbillion\b|\bthousand\b)?', src_text, re.IGNORECASE)
+                        matched_in_src = False
+                        different_magnitude = False
+                        for sm in src_matches:
+                            matched_in_src = True
+                            src_suffix = sm.group(1) or ""
+                            src_suffix = src_suffix.lower().strip()
+                            if src_suffix != suffix:
+                                different_magnitude = True
+                                break
+                        if matched_in_src and different_magnitude:
+                            anomalies.append(f"Potential order of magnitude mismatch for {val_str} ({suffix} in draft vs different scale in source [S{src_num}]).")
+
+        if anomalies:
+            warning = f"⚠️ NUMERICAL SANITY WARNING: Found {len(anomalies)} mathematical or scale anomalies. Double-check percentage breakdowns and scaling."
+            summary = f"Numerical anomalies: {len(anomalies)}"
+        else:
+            warning = None
+            summary = "Numerical sanity verified."
+
+        return NumericalSanityReport(
+            anomalies=anomalies,
+            warning=warning,
+            summary=summary
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Specificity Detector
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class SpecificityReport:
+    """Vague filler and non-specific sentence detection report."""
+    vague_sentences: List[str]
+    warning: Optional[str]
+    summary: str
+
+
+class SpecificityDetector:
+    """
+    Scans the draft for generic or vague filler phrases that lack specificity,
+    flagging them if they are not backed by sources or are outside the self-critique block.
+    """
+    _VAGUE_PHRASES = [
+        "monitor closely", "potential opportunities", "careful management", "navigate uncertainty",
+        "could pose risks", "may impact", "in the long run", "going forward", "closely monitor",
+        "potential risk", "careful oversight", "strategic implications", "potential for",
+        "should be watched", "uncertain future", "requires attention"
+    ]
+
+    _CITATION_RE = re.compile(r'\[[Ss]\s*(\d+)\]')
+
+    def check(self, draft: str, module: Optional[Any] = None) -> SpecificityReport:
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', draft_clean) if len(s.strip()) > 15]
+
+        vague_phrases = self._VAGUE_PHRASES[:]
+        if module:
+            vague_phrases.extend(module.get_vague_phrases())
+
+        vague_sentences = []
+        for sent in sentences:
+            sent_lower = sent.lower()
+            if any(phrase in sent_lower for phrase in vague_phrases):
+                if not self._CITATION_RE.search(sent):
+                    vague_sentences.append(sent[:150] + ("…" if len(sent) > 150 else ""))
+
+        if vague_sentences:
+            warning = f"⚠️ VAGUENESS DETECTED: Found {len(vague_sentences)} sentences using generic LLM filler language without source backing. Replace with specific evidence or delete."
+            summary = f"Vague sentences: {len(vague_sentences)}"
+        else:
+            warning = None
+            summary = "No unbacked vagueness detected."
+
+        return SpecificityReport(
+            vague_sentences=vague_sentences,
+            warning=warning,
+            summary=summary
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Confidence Coverage Checker
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class ConfidenceReport:
+    """Confidence calibration and speculative claim alignment report."""
+    uncalibrated_speculations: List[str]      # speculative claims lacking confidence label
+    overconfident_unbacked_claims: List[str]  # confident claims without source
+    warning: Optional[str]
+    summary: str
+
+
+class ConfidenceCoverageChecker:
+    """
+    Verifies that speculative claims carry appropriate confidence labels,
+    and flags overly confident assertions that lack inline sources.
+    """
+    _SPECULATIVE_KEYWORDS = ["infer", "suggests", "could", "may", "might", "speculate", "perhaps", "possibly", "potential", "scenario"]
+    _CONFIDENCE_LABELS = [
+        "high confidence", "medium confidence", "low confidence", "moderately likely", 
+        "highly likely", "highly speculative", "probability", "probabilistic", "confidence level",
+        "certainty", "uncertainty", "speculatively", "inferred"
+    ]
+    _CONFIDENT_KEYWORDS = ["will", "definitely", "clearly", "obviously", "certainly", "proves", "undoubtedly", "always"]
+
+    _CITATION_RE = re.compile(r'\[[Ss]\s*(\d+)\]')
+
+    def check(self, draft: str) -> ConfidenceReport:
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', draft_clean) if len(s.strip()) > 15]
+
+        uncalibrated_speculations = []
+        overconfident_unbacked_claims = []
+
+        for sent in sentences:
+            sent_lower = sent.lower()
+            has_source = bool(self._CITATION_RE.search(sent))
+
+            is_speculative = any(w in sent_lower for w in self._SPECULATIVE_KEYWORDS)
+            if is_speculative:
+                has_label = any(lbl in sent_lower for lbl in self._CONFIDENCE_LABELS)
+                if not has_label:
+                    uncalibrated_speculations.append(sent[:150] + ("…" if len(sent) > 150 else ""))
+
+            is_confident = any(w in sent_lower for w in self._CONFIDENT_KEYWORDS)
+            if is_confident and not has_source:
+                overconfident_unbacked_claims.append(sent[:150] + ("…" if len(sent) > 150 else ""))
+
+        warnings = []
+        if uncalibrated_speculations:
+            warnings.append(f"{len(uncalibrated_speculations)} speculative claims lack confidence labels")
+        if overconfident_unbacked_claims:
+            warnings.append(f"{len(overconfident_unbacked_claims)} confident claims lack source citations")
+
+        if warnings:
+            warning = f"⚠️ CONFIDENCE CALIBRATION ISSUES: {'; '.join(warnings)}. Calibrate your assertions."
+            summary = f"Uncalibrated spec: {len(uncalibrated_speculations)} | Overconfident: {len(overconfident_unbacked_claims)}"
+        else:
+            warning = None
+            summary = "Confidence calibration verified."
+
+        return ConfidenceReport(
+            uncalibrated_speculations=uncalibrated_speculations,
+            overconfident_unbacked_claims=overconfident_unbacked_claims,
+            warning=warning,
+            summary=summary
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Analytical Report Aggregator
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class AnalyticalReport:
+    """Aggregates all metric reports for analytical audit input to Composer."""
+    grounding: GroundingReport
+    credibility: CredibilityReport
+    contradictions: ContradictionReport
+    numerical_sanity: NumericalSanityReport
+    specificity: SpecificityReport
+    confidence: ConfidenceReport
+
+    def to_composer_block(self) -> str:
+        lines = ["[Analytical Audit Results — issues requiring immediate resolution]"]
+        
+        warnings = []
+        if self.grounding.warning:
+            warnings.append(self.grounding.warning)
+        if self.contradictions.warning:
+            warnings.append(self.contradictions.warning)
+        if self.numerical_sanity.warning:
+            warnings.append(self.numerical_sanity.warning)
+        if self.specificity.warning:
+            warnings.append(self.specificity.warning)
+        if self.confidence.warning:
+            warnings.append(self.confidence.warning)
+            
+        if warnings:
+            lines.append("Audit Warnings:")
+            for w in warnings:
+                lines.append(f"  - {w}")
+        else:
+            lines.append("No critical issues detected. Proceed with polishing.")
+
+        if self.grounding.high_risk_sentences:
+            lines.append("\nUnanchored Factual Sentences (cite sources inline using [S1] etc or reframe as inference):")
+            for s in self.grounding.high_risk_sentences:
+                lines.append(f"  - {s}")
+
+        if self.contradictions.contradictions:
+            lines.append("\nInternal Contradictions to resolve:")
+            for ent, s1, s2, reason in self.contradictions.contradictions:
+                lines.append(f"  - {reason}")
+
+        if self.numerical_sanity.anomalies:
+            lines.append("\nNumerical Sanity Anomalies to correct:")
+            for anom in self.numerical_sanity.anomalies:
+                lines.append(f"  - {anom}")
+
+        if self.specificity.vague_sentences:
+            lines.append("\nVague filler sentences to specify or remove:")
+            for s in self.specificity.vague_sentences:
+                lines.append(f"  - {s}")
+
+        if self.confidence.uncalibrated_speculations:
+            lines.append("\nSpeculative claims lacking confidence calibration labels:")
+            for s in self.confidence.uncalibrated_speculations:
+                lines.append(f"  - {s}")
+
+        if self.confidence.overconfident_unbacked_claims:
+            lines.append("\nOverconfident claims lacking factual sources:")
+            for s in self.confidence.overconfident_unbacked_claims:
+                lines.append(f"  - {s}")
+
+        lines.append(f"\nSource Quality Map: {self.credibility.summary}")
+
+        return "\n".join(lines)
+
+
 class ReportStatus(str, Enum):
     PENDING = "pending"
     PLANNING = "planning"
@@ -621,32 +1374,99 @@ Focus on "what the future looks like" — simulation results ARE the predicted f
    - If information is insufficient in some area, state that honestly
 
 ═══════════════════════════════════════════════════════════════
-[Epistemic and Analytical Control Layer]
+[Analytical Scaffold and Epistemic Control Layer]
 ═══════════════════════════════════════════════════════════════
 
-To ensure professional, defensible, and rigorous analysis instead of overconfident SEO/retail narrative, you MUST apply the following epistemic and analytical standards to all your findings:
+To ensure rigorous, defensible, and analytical prediction reasoning instead of retail SEO storytelling, you MUST structure your analysis according to the following strict analytical frameworks:
 
-1. [Distinguish Fact vs Inference vs Speculation]
-   - Fact: Direct data points from simulation/web tool results (e.g., actual statements, node/relationship existence).
-   - Inference: Logical deductions clearly derived from facts. State the logic explicitly.
-   - Speculation: Potential trajectories or scenarios that could happen but aren't strictly proven. Label these as speculative possibilities.
+1. [Risk-First Ordering and Vulnerability Focus]
+   - You MUST prioritize risk-first reasoning: analyze systemic vulnerabilities, downside scenarios, friction points, and potential failure modes BEFORE describing optimistic or smooth trajectories.
+   - Begin your section by exposing the highest-impact downside or systemic friction discovered in the simulation.
 
-2. [Source Hierarchy and Credibility Weighting]
-   - Weigh evidence based on source quality. For example, direct agent interviews or multiple cross-referenced agent statements have higher epistemic weight than a single isolated agent claim.
-   - Explicitly note if a claim is based on high-credibility, cross-verified evidence, or if it relies on sparse, unverified sources.
+2. [Causal reasoning chain expansion]
+   - Every major finding or claim MUST follow a complete causal-chain scaffold:
+     `Event / Observation → Operational Impact → Financial/Economic Impact → Strategic Implications → Vulnerability/Risk Invalidation`
+   - Do not simply state "Event X occurred." Map it out completely. If a link in the chain is not direct or is missing in the simulation data, explicitly mark it as "unobserved/missing link" or deductively inferred.
 
-3. [Uncertainty Calibration]
-   - Avoid deterministic narratives and "authority theater."
-   - Calibrate your confidence. Use precise language to indicate confidence levels (e.g., "high confidence based on...", "moderately likely", "low confidence due to sparse data").
-   - Explicitly state when the retrieved evidence is insufficient or when there are missing variables/perspectives.
+3. [Probabilistic Scenario Mapping (Base/Bear/Bull)]
+   - You MUST conclude the section with a clear scenario mapping block:
+     - **Base Scenario** (the most likely trajectory with rough probability band, e.g., 60-70%)
+     - **Bear Scenario** (downside trajectory, probability band, e.g., 20-30%)
+     - **Bull Scenario** (upside trajectory, probability band, e.g., 10%)
+     - For each scenario, state the exact falsifiable trigger condition (what specific agent actions or metrics would shift the system into this scenario).
 
-4. [Alternative Scenarios and Counter-evidence]
-   - Do not force a single, cohesive narrative at the expense of contradictory signals.
-   - If there are dissenting agents, conflicting reactions, or evidence of counter-trends, explicitly discuss them. Provide alternative scenarios ("If X happens, then Y; however, if Z occurs, then W is a highly likely counter-scenario").
+4. [Source Credibility and Evidence Weighting Hierarchy]
+   - Weigh retrieved evidence based on source quality. Use the following hierarchy:
+     - **HIGH Credibility**: `interview_agents` (direct raw opinions) and `insight_forge` (cross-referenced multidimensional metrics)
+     - **MEDIUM Credibility**: `panorama_search` (breadth search) and `quick_search` (light semantic matches)
+     - **LOW Credibility**: `web_search` (external ground truth comparing baselines, not simulated agents) and single isolated agent statements.
+   - If a claim rests on a single low-credibility source, explicitly state: "(Note: this claim relies on a single unverified source [Sn])."
+   - Do NOT treat all retrieved assertions equally.
 
-5. [Falsifiability & Risk-First Reasoning]
-   - Always analyze under what conditions your conclusions/predictions might fail (falsifiability criteria).
-   - Prioritize risk-first reasoning: analyze the systemic vulnerabilities, friction points, and potential failure modes before detailing optimistic or smooth trajectories.
+5. [Retrieval Contamination Guardrail]
+   - No single source may anchor more than ~40% of the section's factual claims.
+   - If a single retrieved headline or agent statement dominates, you must broaden your retrieval using other tools or explicitly flag the retrieval bias as an analytical constraint.
+
+═══════════════════════════════════════════════════════════════
+[Temporal Relevance Rules]
+═══════════════════════════════════════════════════════════════
+
+Each tool result you receive begins with a [Temporal Context] block generated by the system. You MUST apply the following rules:
+
+1. [Read the Temporal Context header]
+   - Check the "Freshness requirement" (HIGH / MEDIUM / LOW) and the "Source freshness score".
+   - Note the "Dates found" and "Most recent" date for the retrieved facts.
+
+2. [Cite key claims with a date]
+   - Whenever a date is available for a claim, append "as of [date]" — e.g.:
+     > "Agent X reported 65% support as of 2024-03-15."
+   - If no date is found, omit the tag rather than fabricating one.
+
+3. [Resolve conflicts between old and new sources]
+   - If two retrieved sources make contradictory claims, prefer the one with the newer date.
+   - Explicitly note the conflict: "Earlier data (as of [old date]) suggested X, but more recent data (as of [new date]) indicates Y."
+   - Do NOT silently merge contradictory claims into a single coherent narrative.
+
+4. [Flag stale sources for high-freshness topics]
+   - If a [Temporal Context] block shows a staleness warning (⚠️), explicitly acknowledge it.
+   - Use language such as: "Note: the available data for [topic] dates to [date]; current conditions may differ."
+   - Do NOT present stale data as a current, confirmed fact.
+
+5. [Display "as of [date]" in the final answer]
+   - Key statistics, prices, sentiment figures, regulatory status, and other time-sensitive claims
+     must carry an "as of [date]" qualifier in the final text visible to the reader.
+
+═══════════════════════════════════════════════════════════════
+[Grounding Rules — source citation is mandatory]
+═══════════════════════════════════════════════════════════════
+
+Every tool result you receive is labelled [S1], [S2], … [SN] in the observation header.
+You MUST ground your Final Answer to these numbered sources using the following rules:
+
+1. [Cite every factual claim]
+   - After each specific fact, statistic, quote, or event you take from a source, append the
+     source tag immediately: e.g. "Support reached 72% [S2]" or "Agent X said '…' [S1]."
+   - Do not group all citations at the end — tag each claim inline.
+
+2. [Do not invent facts beyond the sources]
+   - Only assert as fact what appears in [S1]–[SN].
+   - If you draw a logical inference beyond the sources, mark it as inference:
+     e.g. "This suggests … (inferred, not directly stated in sources)."
+   - If you make a speculative projection, mark it explicitly:
+     e.g. "Speculatively, … (not evidenced in retrieved sources)."
+
+3. [Handle conflicting sources explicitly]
+   - If [S2] contradicts [S1], do not pick one silently. Write:
+     "[S1] indicates X, while [S2] — which is more recent — indicates Y. The discrepancy
+     may reflect …"
+
+4. [Note unused sources]
+   - If a retrieved source did not contribute to this section, briefly note why in your
+     `<self_critique>`: e.g. "S3 was retrieved but contained no relevant data for this angle."
+
+5. [Source tags are stripped from the published report]
+   - [SN] tags are for internal grounding traceability only; they will be stripped before
+     the report is published. Write naturally, as if the tags are footnotes.
 
 ═══════════════════════════════════════════════════════════════
 [Format rules — extremely important!]
@@ -817,6 +1637,28 @@ Here is an initial draft generated by the planning agent:
    - Preserve the rigorous analytical, probabilistic, and uncertainty-aware tone of the draft.
    - Maintain a clear distinction between verified facts, logical inferences, and speculative scenarios.
    - Retain explicit confidence calibration, alternative scenarios, falsifiability metrics, and risk analysis without smoothing them over into generic overconfident retail prose.
+9. [Temporal Accuracy]
+   - Each observation block starts with a [Temporal Context] header. Use it to determine data freshness.
+   - Append "as of [date]" to key statistics, sentiment figures, prices, and regulatory facts when a date is available.
+   - If the draft contains conflicting claims from different dates, keep the most recent one and note the discrepancy inline.
+   - If a source carries a staleness warning (⚠️) for a high-freshness topic, include a visible caveat in the prose, e.g., "Note: this data dates to [date]; current conditions may differ."
+   - Do NOT smooth over temporal conflicts — contradictions are analytically significant and must be surfaced.
+10. [Grounding — remove [SN] tags, preserve grounding intent]
+    - The draft contains inline [S1], [S2], … citation tags. Strip all [SN] tags from the polished output.
+    - Before stripping a tag, verify the claim it annotates is genuinely supported by the observations above. If a claim appears in the draft but has no corresponding evidence in the observations, either remove the claim or clearly label it as inference/speculation.
+    - If the grounding note below warns of low coverage or unanchored sentences, actively fix them: either anchor each claim to an observation or reframe as inference.
+
+[Analytical Audit & Critique Pass — CRITICAL REQUIREMENT]
+Below is an automated audit pointing out exact analytical defects in the draft. You MUST correct each and every issue mentioned here:
+{analytical_issues}
+
+Critic & Revision Rules:
+1. You MUST remove and rewrite any sentences containing vague phrases from the word list ("monitor closely", "potential opportunities", "careful management", "navigate uncertainty", "could pose risks", "may impact", "in the long run", "going forward"). Do NOT use these vague filler phrases verbatim unless they are part of a direct quote from a source.
+2. Resolve any internal contradictions mentioned in the audit. Do not smooth them over; explain them or select the newer/better-grounded evidence.
+3. Correct all numerical sanity anomalies (e.g., breakdown percentages that don't sum to ~100%, or order-of-magnitude mismatches vs. source observations).
+4. Explicitly add uncertainty labels and confidence levels (e.g. "with high confidence", "moderately likely", "highly speculative") to speculative claims.
+5. Back up any highly confident claims with source citation references before stripping the citation tags.
+6. Preserve proper analytical hedging; do NOT convert a conditional/hedged statement into an overconfident claim.
 """
 
 # ── ReACT loop message templates ──
@@ -824,12 +1666,13 @@ Here is an initial draft generated by the planning agent:
 REACT_OBSERVATION_TEMPLATE = """\
 Observation (retrieval result):
 
-═══ Tool {tool_name} returned ═══
+═══ Tool {tool_name} returned — [S{source_num}] ═══
 {result}
 
 ═══════════════════════════════════════════════════════════════
 Tools called {tool_calls_count}/{max_tool_calls} times (used: {used_tools_str}){unused_hint}
-- If you have enough information: output a `<self_critique>` block assessing assumptions, gaps, and calibration, and then output your final content starting with "Final Answer:" (must quote the original text above)
+- When you cite a fact from this result in your Final Answer, tag it with [S{source_num}] directly after the claim.
+- If you have enough information: output a `<self_critique>` block assessing assumptions, gaps, and calibration, and then output your final content starting with "Final Answer:" (must quote the original text above, with [SN] citations)
 - If you need more information: call another tool to continue retrieval
 ═══════════════════════════════════════════════════════════════"""
 
@@ -914,6 +1757,13 @@ class ReportAgent:
         self.zep_tools = zep_tools or ZepToolsService()
         self.composer_llm = composer_llm or LLMClient.for_composer()
         self._web_search_corpus = None
+        self._temporal_filter = TemporalRelevanceFilter()
+        self._grounding_verifier = GroundingVerifier()
+        self._credibility_scorer = SourceCredibilityScorer()
+        self._contradiction_detector = ContradictionDetector()
+        self._numerical_sanity_checker = NumericalSanityChecker()
+        self._specificity_detector = SpecificityDetector()
+        self._confidence_checker = ConfidenceCoverageChecker()
         
         self.tools = self._define_tools()
         self.report_logger: Optional[ReportLogger] = None
@@ -1145,7 +1995,13 @@ class ReportAgent:
                 desc_parts.append(f"  Parameters: {params_desc}")
         return "\n".join(desc_parts)
 
-    def _compose_final_section(self, section: ReportSection, draft: str, observation_log: List[str]) -> str:
+    def _compose_final_section(
+        self,
+        section: ReportSection,
+        draft: str,
+        observation_log: List[str],
+        analytical_report: Optional[AnalyticalReport] = None,
+    ) -> str:
         """Use the composer LLM to write the final polished markdown for the section."""
         if not Config.REPORT_USE_COMPOSER:
             return draft
@@ -1158,11 +2014,26 @@ class ReportAgent:
             "Never use Markdown headings (#, ##, ###) in your response; use **bold text** for sub-sections instead.\n"
             f"{get_language_instruction()}"
         )
+
+        if analytical_report:
+            if isinstance(analytical_report, AnalyticalReport):
+                analytical_issues = analytical_report.to_composer_block()
+            else:
+                # Fallback if a GroundingReport is passed
+                analytical_issues = f"[Grounding note — action required]\n{analytical_report.summary}"
+                if getattr(analytical_report, 'warning', None):
+                    analytical_issues += f"\nWarning: {analytical_report.warning}"
+                if getattr(analytical_report, 'high_risk_sentences', None):
+                    analytical_issues += "\nUnanchored sentences:\n" + "\n".join(f"  - {s}" for s in analytical_report.high_risk_sentences)
+        else:
+            analytical_issues = "(No automated audit results available. Ensure general analytical rigor and grounding.)"
+
         composer_user = COMPOSER_USER_TEMPLATE.format(
             section_title=section.title,
             simulation_requirement=self.simulation_requirement,
             observations="\n\n---\n\n".join(observation_log) if observation_log else "(No tool observations recorded for this section)",
             draft=draft,
+            analytical_issues=analytical_issues,
         )
 
         try:
@@ -1182,6 +2053,185 @@ class ReportAgent:
         except Exception as e:
             logger.error(f"[Composer] Hand-off failed, falling back to original draft: {e}")
             return draft
+
+    def _select_analytical_module(self, section_title: str) -> Any:
+        text = (self.simulation_requirement + " " + section_title).lower()
+        
+        from .analytical_modules import BaseAnalyticalModule
+        from .analytical_modules.markets import MarketsAnalyticalModule
+        from .analytical_modules.policy import PolicyAnalyticalModule
+        from .analytical_modules.organizational_risk import OrganizationalRiskAnalyticalModule
+        
+        if any(kw in text for kw in ["market", "price", "stock", "bond", "crypto", "currency", "financial", "earnings", "investment", "portfolio", "trading"]):
+            return MarketsAnalyticalModule()
+            
+        if any(kw in text for kw in ["policy", "regulation", "law", "bill", "act", "compliance", "regulatory", "sanction", "statute", "enforcement", "government"]):
+            return PolicyAnalyticalModule()
+            
+        if any(kw in text for kw in ["risk", "operational", "vulnerability", "failure", "continuity", "supply chain", "incident", "disaster", "crisis"]):
+            return OrganizationalRiskAnalyticalModule()
+            
+        return BaseAnalyticalModule()
+
+    def _run_analytical_audit(
+        self,
+        final_answer: str,
+        tool_calls_count: int,
+        sources_metadata: List[Tuple[int, str, str]],
+        section_title: str = "",
+    ) -> AnalyticalReport:
+        module = self._select_analytical_module(section_title)
+        grounding = self._grounding_verifier.check(final_answer, tool_calls_count)
+        credibility = self._credibility_scorer.check(final_answer, sources_metadata)
+        contradictions = self._contradiction_detector.check(final_answer)
+        numerical_sanity = self._numerical_sanity_checker.check(final_answer, sources_metadata, module)
+        specificity = self._specificity_detector.check(final_answer, module)
+        confidence = self._confidence_checker.check(final_answer)
+        
+        return AnalyticalReport(
+            grounding=grounding,
+            credibility=credibility,
+            contradictions=contradictions,
+            numerical_sanity=numerical_sanity,
+            specificity=specificity,
+            confidence=confidence
+        )
+
+    def _log_analytical_audit_metrics(
+        self,
+        section_title: str,
+        section_index: int,
+        initial_report: AnalyticalReport,
+        final_answer: str,
+        tool_calls_count: int,
+        sources_metadata: List[Tuple[int, str, str]]
+    ):
+        if not self.report_logger:
+            return
+
+        final_audit = self._run_analytical_audit(final_answer, tool_calls_count, sources_metadata, section_title)
+        
+        initial_vague = len(initial_report.specificity.vague_sentences)
+        final_vague = len(final_audit.specificity.vague_sentences)
+        
+        initial_contra = len(initial_report.contradictions.contradictions)
+        final_contra = len(final_audit.contradictions.contradictions)
+        
+        initial_anom = len(initial_report.numerical_sanity.anomalies)
+        final_anom = len(final_audit.numerical_sanity.anomalies)
+        
+        initial_uncalibrated = len(initial_report.confidence.uncalibrated_speculations)
+        final_uncalibrated = len(final_audit.confidence.uncalibrated_speculations)
+        
+        vague_phrases_removed = max(0, initial_vague - final_vague)
+        contradictions_resolved = max(0, initial_contra - final_contra)
+        confidence_labels_added = max(0, initial_uncalibrated - final_uncalibrated)
+        
+        self.report_logger.log(
+            action="analytical_audit",
+            stage="generating",
+            section_title=section_title,
+            section_index=section_index,
+            details={
+                "vague_phrases_removed": vague_phrases_removed,
+                "contradictions_flagged": initial_contra,
+                "contradictions_resolved": contradictions_resolved,
+                "numerical_anomalies": final_anom,
+                "confidence_labels_added": confidence_labels_added,
+                "message": f"Analytical audit completed: {vague_phrases_removed} vague phrases removed, {contradictions_resolved}/{initial_contra} contradictions resolved, {final_anom} numerical anomalies remaining, {confidence_labels_added} confidence labels added."
+            }
+        )
+
+    def _run_cross_section_pass(self, outline: ReportOutline):
+        """
+        Runs an analytical sanity and contradiction check across all sections.
+        If a cross-section contradiction or numerical anomaly is found, it uses the composer
+        to revise only the offending sections/paragraphs.
+        """
+        logger.info("[Cross-Section] Starting cross-section consistency checks...")
+        
+        section_map = {}
+        for i, section in enumerate(outline.sections):
+            section_map[i] = section.content
+            
+        combined_text = "\n\n".join(section_map.values())
+        
+        cross_contradictions = self._contradiction_detector.check(combined_text)
+        cross_numerical = self._numerical_sanity_checker.check(combined_text, [])
+        
+        issues_to_resolve = []
+        if cross_contradictions.contradictions:
+            for ent, s1, s2, reason in cross_contradictions.contradictions:
+                issues_to_resolve.append(f"Contradiction: {reason}")
+                
+        if cross_numerical.anomalies:
+            for anom in cross_numerical.anomalies:
+                issues_to_resolve.append(f"Numerical Anomaly: {anom}")
+                
+        if not issues_to_resolve:
+            logger.info("[Cross-Section] No cross-section contradictions or numerical anomalies detected.")
+            return
+            
+        logger.warning(f"[Cross-Section] Found {len(issues_to_resolve)} cross-section consistency issues.")
+        for issue in issues_to_resolve:
+            logger.warning(f"  - {issue}")
+            
+        for i, section in enumerate(outline.sections):
+            involved_issues = []
+            for issue in issues_to_resolve:
+                if "Contradiction:" in issue:
+                    match = re.search(r"Entity '([^']+)' has", issue)
+                    if match:
+                        ent_name = match.group(1)
+                        if ent_name in section.content:
+                            involved_issues.append(issue)
+                else:
+                    numbers = re.findall(r'\b\d+(?:\.\d+)?\b', issue)
+                    if any(num in section.content for num in numbers):
+                        involved_issues.append(issue)
+                        
+            if involved_issues:
+                logger.info(f"[Cross-Section] Revising section '{section.title}' to resolve cross-section issues.")
+                
+                composer_system = (
+                    "You are a senior analyst performing a final consistency review across a multi-section prediction report.\n"
+                    "Your task is to revise and polish the section to resolve consistency errors with other sections.\n"
+                    "Write polished markdown only. Do not use Markdown headings (#, ##, ###) in your response; use **bold text** instead.\n"
+                    f"{get_language_instruction()}"
+                )
+                
+                issues_block = "\n".join(f"  - {iss}" for iss in involved_issues)
+                
+                composer_user = (
+                    f"You are performing a final cross-section review of the section: {section.title}\n\n"
+                    f"[Prediction Requirement / Scenario]\n{self.simulation_requirement}\n\n"
+                    f"[Current Section Content]\n{section.content}\n\n"
+                    f"[Cross-Section Issues to Resolve]\n"
+                    f"Our automated validator detected the following contradictions/anomalies involving this section:\n"
+                    f"{issues_block}\n\n"
+                    f"[Instructions]\n"
+                    f"1. Revise the content to completely resolve the contradictions or numerical mismatches with other sections.\n"
+                    f"2. Ensure you keep the tone analytical, expert, and grounded. Do not introduce speculative claims unless calibrated.\n"
+                    f"3. Do NOT change parts of the text that are not involved in these issues.\n"
+                    f"4. Output ONLY the polished, revised section content. Do not include intro, outro, conversational fillers, or headings."
+                )
+                
+                try:
+                    revised_content = self.composer_llm.chat(
+                        messages=[
+                            {"role": "system", "content": composer_system},
+                            {"role": "user", "content": composer_user},
+                        ],
+                        temperature=0.3,
+                        max_tokens=Config.LLM_CHAT_MAX_TOKENS,
+                    )
+                    if revised_content and revised_content.strip():
+                        cleaned = revised_content.strip()
+                        cleaned = re.sub(r'^#+\s+.*?\n', '', cleaned)
+                        section.content = cleaned.strip()
+                        logger.info(f"[Cross-Section] Successfully resolved cross-section consistency issues for '{section.title}'")
+                except Exception as e:
+                    logger.error(f"[Cross-Section] Revision of '{section.title}' failed: {e}")
     
     def plan_outline(
         self, 
@@ -1309,6 +2359,7 @@ class ReportAgent:
         used_tools = set()  # Record names of used tools
         all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents", "web_search"}
         observation_log = []
+        sources_metadata: List[Tuple[int, str, str]] = []
 
         # Report context, used for sub-question generation in InsightForge
         report_context = f"Section Title: {section.title}\nSimulation Requirement: {self.simulation_requirement}"
@@ -1416,7 +2467,24 @@ class ReportAgent:
                 final_answer = response.split("Final Answer:")[-1].strip()
                 logger.info(t('report.sectionGenDone', title=section.title, count=tool_calls_count))
 
-                final_answer = self._compose_final_section(section, final_answer, observation_log)
+                audit_report = self._run_analytical_audit(final_answer, tool_calls_count, sources_metadata, section.title)
+                logger.info(f"[Grounding] {section.title}: {audit_report.grounding.summary}")
+                if audit_report.grounding.warning:
+                    logger.warning(f"[Grounding] {audit_report.grounding.warning}")
+                if audit_report.contradictions.warning:
+                    logger.warning(f"[Contradictions] {audit_report.contradictions.warning}")
+                if audit_report.numerical_sanity.warning:
+                    logger.warning(f"[Numerical Sanity] {audit_report.numerical_sanity.warning}")
+                if audit_report.specificity.warning:
+                    logger.warning(f"[Specificity] {audit_report.specificity.warning}")
+                if audit_report.confidence.warning:
+                    logger.warning(f"[Confidence] {audit_report.confidence.warning}")
+
+                final_answer = self._compose_final_section(section, final_answer, observation_log, audit_report)
+
+                self._log_analytical_audit_metrics(
+                    section.title, section_index, audit_report, final_answer, tool_calls_count, sources_metadata
+                )
 
                 if self.report_logger:
                     self.report_logger.log_section_content(
@@ -1461,14 +2529,33 @@ class ReportAgent:
                     call.get("parameters", {}),
                     report_context=report_context
                 )
-                observation_log.append(f"Tool: {call['name']}\nParameters: {json.dumps(call.get('parameters', {}), ensure_ascii=False)}\nResult: {result}")
+
+                # Apply temporal relevance filter before feeding the result to the LLM.
+                # This prepends a Temporal Context header with date extraction, freshness
+                # classification, staleness score, and synthesis rules.
+                annotation = self._temporal_filter.build_annotation(
+                    raw_result=result,
+                    simulation_requirement=self.simulation_requirement,
+                    section_title=section.title,
+                    tool_name=call["name"],
+                )
+                if annotation.staleness_warning:
+                    logger.info(
+                        f"[TemporalFilter] {call['name']}: {annotation.staleness_warning} (score={annotation.freshness_score:.1f}, dates={annotation.dates_found[:3]})"
+                    )
+                annotated_result = annotation.header  # includes raw_result appended
+
+                observation_log.append(
+                    f"Tool: {call['name']}\nParameters: {json.dumps(call.get('parameters', {}), ensure_ascii=False)}\nResult: {result}"
+                )
+                sources_metadata.append((tool_calls_count + 1, call["name"], result))
 
                 if self.report_logger:
                     self.report_logger.log_tool_result(
                         section_title=section.title,
                         section_index=section_index,
                         tool_name=call["name"],
-                        result=result,
+                        result=annotated_result,
                         iteration=iteration + 1
                     )
 
@@ -1486,7 +2573,8 @@ class ReportAgent:
                     "role": "user",
                     "content": REACT_OBSERVATION_TEMPLATE.format(
                         tool_name=call["name"],
-                        result=result,
+                        result=annotated_result,
+                        source_num=tool_calls_count,
                         tool_calls_count=tool_calls_count,
                         max_tool_calls=self.MAX_TOOL_CALLS_PER_SECTION,
                         used_tools_str=", ".join(used_tools),
@@ -1520,7 +2608,24 @@ class ReportAgent:
             logger.info(t('report.sectionNoPrefix', title=section.title, count=tool_calls_count))
             final_answer = response.strip()
 
-            final_answer = self._compose_final_section(section, final_answer, observation_log)
+            audit_report = self._run_analytical_audit(final_answer, tool_calls_count, sources_metadata, section.title)
+            logger.info(f"[Grounding] {section.title}: {audit_report.grounding.summary}")
+            if audit_report.grounding.warning:
+                logger.warning(f"[Grounding] {audit_report.grounding.warning}")
+            if audit_report.contradictions.warning:
+                logger.warning(f"[Contradictions] {audit_report.contradictions.warning}")
+            if audit_report.numerical_sanity.warning:
+                logger.warning(f"[Numerical Sanity] {audit_report.numerical_sanity.warning}")
+            if audit_report.specificity.warning:
+                logger.warning(f"[Specificity] {audit_report.specificity.warning}")
+            if audit_report.confidence.warning:
+                logger.warning(f"[Confidence] {audit_report.confidence.warning}")
+
+            final_answer = self._compose_final_section(section, final_answer, observation_log, audit_report)
+
+            self._log_analytical_audit_metrics(
+                section.title, section_index, audit_report, final_answer, tool_calls_count, sources_metadata
+            )
 
             if self.report_logger:
                 self.report_logger.log_section_content(
@@ -1549,8 +2654,25 @@ class ReportAgent:
             final_answer = response.split("Final Answer:")[-1].strip()
         else:
             final_answer = response
+
+        audit_report = self._run_analytical_audit(final_answer, tool_calls_count, sources_metadata, section.title)
+        logger.info(f"[Grounding] {section.title}: {audit_report.grounding.summary}")
+        if audit_report.grounding.warning:
+            logger.warning(f"[Grounding] {audit_report.grounding.warning}")
+        if audit_report.contradictions.warning:
+            logger.warning(f"[Contradictions] {audit_report.contradictions.warning}")
+        if audit_report.numerical_sanity.warning:
+            logger.warning(f"[Numerical Sanity] {audit_report.numerical_sanity.warning}")
+        if audit_report.specificity.warning:
+            logger.warning(f"[Specificity] {audit_report.specificity.warning}")
+        if audit_report.confidence.warning:
+            logger.warning(f"[Confidence] {audit_report.confidence.warning}")
+
+        final_answer = self._compose_final_section(section, final_answer, observation_log, audit_report)
         
-        final_answer = self._compose_final_section(section, final_answer, observation_log)
+        self._log_analytical_audit_metrics(
+            section.title, section_index, audit_report, final_answer, tool_calls_count, sources_metadata
+        )
         
         # Record section content generation completion log
         if self.report_logger:
@@ -1805,6 +2927,9 @@ class ReportAgent:
                 report_id, "generating", 95, t('progress.assemblingReport'),
                 completed_sections=completed_section_titles
             )
+            
+            # Run cross-section pass before final assembly
+            self._run_cross_section_pass(outline)
             
             # Assemble complete report using ReportManager
             report.markdown_content = ReportManager.assemble_full_report(report_id, outline)
