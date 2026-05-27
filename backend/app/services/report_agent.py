@@ -25,6 +25,7 @@ from .zep_tools import (
     PanoramaResult,
     InterviewResult
 )
+from .evidence_evaluator import EvidenceEvaluator
 
 logger = get_logger('mirofish.report_agent')
 
@@ -320,6 +321,9 @@ class ReportConsoleLogger:
             loggers_to_detach = [
                 'mirofish.report_agent',
                 'mirofish.zep_tools',
+                'mirofish.graphiti_tools',
+                'mirofish.graphiti',
+                'mirofish.pipeline_retry',
             ]
             
             for logger_name in loggers_to_detach:
@@ -330,6 +334,33 @@ class ReportConsoleLogger:
             self._file_handler.close()
             self._file_handler = None
     
+    @classmethod
+    def cleanup_handlers(cls, report_id: str):
+        """Find, close, and detach all active FileHandlers pointing to this report ID."""
+        import logging
+        
+        target_path = os.path.normpath(os.path.join(
+            Config.UPLOAD_FOLDER, 'reports', report_id, 'console_log.txt'
+        ))
+        
+        # Add root logger
+        loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
+        loggers.append(logging.getLogger())
+        
+        for logg in loggers:
+            handlers_to_remove = []
+            for handler in logg.handlers:
+                if isinstance(handler, logging.FileHandler):
+                    if handler.baseFilename and os.path.normpath(handler.baseFilename) == target_path:
+                        handlers_to_remove.append(handler)
+            
+            for handler in handlers_to_remove:
+                try:
+                    logg.removeHandler(handler)
+                    handler.close()
+                except Exception:
+                    pass
+
     def __del__(self):
         self.close()
 
@@ -813,6 +844,8 @@ class NumericalSanityChecker:
         if module:
             # Consume domain-specific sanity checks
             anomalies.extend(module.check_numerical_sanity(draft, sources_metadata))
+            if hasattr(module, 'check_quantitative_grounding'):
+                anomalies.extend(module.check_quantitative_grounding(draft, sources_metadata))
         draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', draft_clean) if len(s.strip()) > 15]
 
@@ -1017,6 +1050,761 @@ class ConfidenceCoverageChecker:
 
 
 # ═══════════════════════════════════════════════════════════════
+# Skepticism Pass
+# ═══════════════════════════════════════════════════════════════
+
+@dataclass
+class SkepticismReport:
+    """Report on overstated certainty, evidence-confidence mismatches, and missing alternatives."""
+    overstated_certainty: bool
+    mismatches: List[str]
+    missing_alternatives: bool
+    warning: Optional[str]
+    summary: str
+
+
+class SkepticismChecker:
+    """
+    Evaluates draft for excessive confidence, unhedged claims backed by low-credibility
+    or low-specificity evidence, and a lack of alternative/counter-scenario framing.
+    """
+    _CONFIDENT_KEYWORDS = ["will", "definitely", "clearly", "obviously", "certainly", "proves", "undoubtedly", "always"]
+    _SPECULATIVE_KEYWORDS = ["could", "may", "might", "perhaps", "possibly", "potential", "suggests", "infer", "speculate"]
+    _ALTERNATIVE_KEYWORDS = ["alternatively", "however", "counter-argument", "on the other hand", "conversely", "another possibility", "different perspective"]
+    _CITATION_RE = re.compile(r'\[[Ss]\s*(\d+)\]')
+
+    def check(self, draft: str, evidence_scores: Dict[int, Any]) -> SkepticismReport:
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', draft_clean) if len(s.strip()) > 15]
+
+        confident_count = 0
+        speculative_count = 0
+        has_alternatives = False
+
+        mismatches = []
+
+        for sent in sentences:
+            sent_lower = sent.lower()
+            
+            # 1. Count confident vs speculative
+            is_confident = any(w in sent_lower for w in self._CONFIDENT_KEYWORDS)
+            is_speculative = any(w in sent_lower for w in self._SPECULATIVE_KEYWORDS)
+            
+            if is_confident:
+                confident_count += 1
+            if is_speculative:
+                speculative_count += 1
+                
+            # 2. Check alternatives
+            if any(w in sent_lower for w in self._ALTERNATIVE_KEYWORDS):
+                has_alternatives = True
+                
+            # 3. Mismatch checks
+            if is_confident:
+                cited_nums = {int(m.group(1)) for m in self._CITATION_RE.finditer(sent)}
+                for num in cited_nums:
+                    if num in evidence_scores:
+                        score = evidence_scores[num]
+                        # If a definitive word is used, but credibility or specificity is low
+                        tier = getattr(score, "epistemic_tier", "")
+                        low_epistemic = tier in (
+                            "RETAIL_COMMENTARY", "SOCIAL_OPINION", "SPECULATIVE", "ANALYST_ACTION",
+                        )
+                        weak_weight = getattr(score, "synthesis_weight", 1.0) < 0.45
+                        if (
+                            score.credibility < 0.5
+                            or score.specificity < 0.4
+                            or low_epistemic
+                            or weak_weight
+                        ):
+                            mismatches.append(
+                                f"Sentence uses definitive language '{sent[:50]}...' but cites "
+                                f"[S{num}] tier={tier} (weight={getattr(score, 'synthesis_weight', 0):.2f}, "
+                                f"credibility={score.credibility:.1f})"
+                            )
+
+        overstated_certainty = False
+        ratio = 0.0
+        if confident_count > 0:
+            ratio = confident_count / (confident_count + speculative_count)
+            if ratio > 0.60:
+                overstated_certainty = True
+
+        missing_alternatives = not has_alternatives
+
+        warnings = []
+        if overstated_certainty:
+            warnings.append(f"Overstated certainty: {confident_count} confident sentences vs {speculative_count} speculative/hedged sentences (ratio {ratio:.1%}; recommend more hedging)")
+        if mismatches:
+            warnings.append(f"Evidence-confidence mismatches: {len(mismatches)} confident claims rely on low-quality evidence")
+        if missing_alternatives:
+            warnings.append("Missing alternative scenario or counter-argument framing (recommend incorporating other perspectives)")
+
+        if warnings:
+            warning = "⚠️ SKEPTICISM WARNING: " + "; ".join(warnings)
+            summary = f"Overstated certainty: {overstated_certainty} | Mismatches: {len(mismatches)} | Missing alternatives: {missing_alternatives}"
+        else:
+            warning = None
+            summary = "Skepticism and confidence balance verified."
+
+        return SkepticismReport(
+            overstated_certainty=overstated_certainty,
+            mismatches=mismatches,
+            missing_alternatives=missing_alternatives,
+            warning=warning,
+            summary=summary
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Evidence alignment / anchoring / causal / numerical coverage
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
+class EvidenceAlignmentReport:
+    """
+    Heuristic claim-to-evidence alignment verifier.
+
+    Goal: detect "analytical-looking" sentences whose cited claims don't
+    actually appear in the cited evidence text (especially for numeric claims).
+    """
+
+    unsupported_sentences: List[str]
+    alignment_score: float          # supported_claims / assessed_claims (0–1)
+    warning: Optional[str]
+    summary: str
+
+
+class EvidenceAlignmentChecker:
+    _CITATION_RE = re.compile(r'\[[Ss]\s*(\d+)\]')
+    _NUM_RE = re.compile(r'\b\d+(?:\.\d+)?\b')
+    _PCT_RE = re.compile(r'\b(\d+(?:\.\d+)?)\s*%')
+    _DOLLAR_RE = re.compile(
+        r'\$\s*(\d+(?:\.\d+)?)(?:\s*(million|billion|thousand))?\b', re.IGNORECASE
+    )
+    _SUFFIX_AMOUNT_RE = re.compile(r'\b(\d+(?:\.\d+)?)\s*(million|billion|thousand)\b', re.IGNORECASE)
+    _DATE_RE = re.compile(r'\b20[1-3]\d\b')
+    _ENTITY_RE = re.compile(r'\b[A-Z][a-zA-Z0-9_]+\b')
+
+    _FINANCIAL_KEY_TERMS = {
+        "revenue",
+        "profit",
+        "loss",
+        "earnings",
+        "margin",
+        "ebitda",
+        "market cap",
+        "valuation",
+        "p/e",
+        "p/e ratio",
+        "ev/ebitda",
+        "multiple",
+        "pe",
+        "ev",
+        "cost",
+        "pricing",
+        "tariff",
+        "acquisition",
+        "funding",
+        "dilution",
+        "accretion",
+    }
+    _MEASURABLE_SIGNAL_TERMS = {"revenue", "profit", "loss", "margin", "market cap", "valuation", "cost", "earnings"}
+
+    def _extract_numeric_signatures(self, text: str) -> Dict[str, List[float]]:
+        pct_vals = [float(v) for v in self._PCT_RE.findall(text)]
+        dollar_vals: List[float] = []
+        for v, _suffix in self._DOLLAR_RE.findall(text):
+            dollar_vals.append(float(v))
+        # Also treat "X million" etc as currency-like numeric mentions.
+        suffix_vals = [float(v) for v, _unit in self._SUFFIX_AMOUNT_RE.findall(text)]
+        date_vals = [float(v) for v in self._DATE_RE.findall(text)]
+
+        return {
+            "pct": pct_vals,
+            "amount": dollar_vals + suffix_vals,
+            "date": date_vals,
+        }
+
+    @staticmethod
+    def _floats_match(a: float, b: float, tol: float = 1e-6) -> bool:
+        return abs(a - b) <= tol
+
+    def _sentence_has_claim_signal(self, sentence_lower: str, numeric_sigs: Dict[str, List[float]]) -> bool:
+        if numeric_sigs["pct"] or numeric_sigs["amount"] or numeric_sigs["date"]:
+            return True
+        return any(term in sentence_lower for term in self._FINANCIAL_KEY_TERMS)
+
+    def _is_sentence_likely_quantified(self, sentence_lower: str, numeric_sigs: Dict[str, List[float]]) -> bool:
+        # If it mentions measurable terms but lacks numeric signatures, it is still a claim,
+        # but we won't require numeric overlap (we'll fall back to entity/keyword overlap).
+        return bool(numeric_sigs["pct"] or numeric_sigs["amount"])
+
+    def check(
+        self,
+        draft: str,
+        sources_metadata: List[Tuple[int, str, str]],
+        evidence_scores: Dict[int, Any],
+        min_alignment: float = 0.7,
+    ) -> EvidenceAlignmentReport:
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        sources_by_num = {num: result for num, _, result in sources_metadata}
+
+        sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', draft_clean) if len(s.strip()) > 15]
+
+        assessed = 0
+        supported = 0
+        unsupported: List[str] = []
+
+        for sent in sentences:
+            cited_nums = {int(m.group(1)) for m in self._CITATION_RE.finditer(sent)}
+            if not cited_nums:
+                continue
+
+            sent_lower = sent.lower()
+            numeric_sigs = self._extract_numeric_signatures(sent)
+            if not self._sentence_has_claim_signal(sent_lower, numeric_sigs):
+                continue
+
+            assessed += 1
+
+            sent_entities = {e for e in self._ENTITY_RE.findall(sent) if len(e) > 3}
+            sent_has_measurable_terms = any(t in sent_lower for t in self._MEASURABLE_SIGNAL_TERMS)
+            sent_requires_numeric = self._is_sentence_likely_quantified(sent_lower, numeric_sigs)
+
+            best_support = 0.0
+            for num in cited_nums:
+                src_text = sources_by_num.get(num, "")
+                src_lower = src_text.lower()
+
+                src_numeric_sigs = self._extract_numeric_signatures(src_text)
+
+                numeric_support = 0.0
+                if sent_requires_numeric:
+                    # Numeric claim: require numeric signature overlap (at least one).
+                    pct_ok = any(self._floats_match(v, src_v) for v in numeric_sigs["pct"] for src_v in src_numeric_sigs["pct"])
+                    amt_ok = any(self._floats_match(v, src_v) for v in numeric_sigs["amount"] for src_v in src_numeric_sigs["amount"])
+                    # Important: for quantified claims we avoid "date-only" matches
+                    # (same year) from incorrectly validating the claim magnitude.
+                    numeric_support = 1.0 if (pct_ok or amt_ok) else 0.0
+                else:
+                    date_ok = any(
+                        self._floats_match(v, src_v)
+                        for v in numeric_sigs["date"]
+                        for src_v in src_numeric_sigs["date"]
+                    )
+                    numeric_support = 1.0 if date_ok else 0.0
+
+                entity_support = 0.0
+                if sent_entities:
+                    hits = sum(1 for ent in sent_entities if ent.lower() in src_lower)
+                    entity_support = min(1.0, hits / max(1, len(sent_entities)))
+
+                keyword_support = 0.0
+                if any(term in sent_lower for term in self._FINANCIAL_KEY_TERMS) or sent_has_measurable_terms:
+                    denom = max(1, len([t for t in self._FINANCIAL_KEY_TERMS if t in sent_lower]))
+                    key_hits = sum(1 for term in self._FINANCIAL_KEY_TERMS if term in sent_lower and term in src_lower)
+                    keyword_support = min(1.0, key_hits / denom)
+
+                support = 0.6 * numeric_support + 0.25 * entity_support + 0.15 * keyword_support
+                best_support = max(best_support, support)
+
+            if best_support >= min_alignment:
+                supported += 1
+            else:
+                unsupported.append(sent[:200] + ("…" if len(sent) > 200 else ""))
+
+        if assessed == 0:
+            return EvidenceAlignmentReport(
+                unsupported_sentences=[],
+                alignment_score=1.0,
+                warning=None,
+                summary="Evidence alignment not assessed (no extractable claim sentences with citations).",
+            )
+
+        alignment_score = supported / assessed
+        if unsupported:
+            warning = (
+                f"⚠️ EVIDENCE ALIGNMENT WARNING: {len(unsupported)} cited claim(s) appear weakly supported by their cited sources. "
+                "Remove/replace or re-cite stronger evidence."
+            )
+        else:
+            warning = None
+
+        summary = f"Evidence alignment: {supported}/{assessed} supported claim sentences ({alignment_score:.0%})."
+        return EvidenceAlignmentReport(
+            unsupported_sentences=unsupported[:5],
+            alignment_score=alignment_score,
+            warning=warning,
+            summary=summary,
+        )
+
+
+@dataclass
+class AnchoringDistributionReport:
+    warning: Optional[str]
+    summary: str
+
+
+class AnchoringDistributionChecker:
+    """
+    Detects narrative anchoring risk: one retrieved source dominates citations in the draft.
+    """
+
+    _CITATION_RE = re.compile(r'\[[Ss]\s*(\d+)\]')
+
+    def check(
+        self,
+        draft: str,
+        evidence_scores: Dict[int, Any],
+        min_unique_sources: int = 3,
+        top_share_threshold: float = 0.55,
+    ) -> AnchoringDistributionReport:
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+
+        citations = [int(m.group(1)) for m in self._CITATION_RE.finditer(draft_clean)]
+        if len(citations) < 3:
+            return AnchoringDistributionReport(
+                warning=None,
+                summary="Anchoring distribution not assessed (few citations).",
+            )
+
+        counts: Dict[int, int] = {}
+        for c in citations:
+            counts[c] = counts.get(c, 0) + 1
+
+        unique_sources = list(counts.keys())
+        if len(unique_sources) < min_unique_sources:
+            return AnchoringDistributionReport(
+                warning=None,
+                summary=f"Anchoring distribution not assessed (only {len(unique_sources)} unique cited sources).",
+            )
+
+        total = sum(counts.values())
+        top_source = max(counts.items(), key=lambda kv: kv[1])[0]
+        top_share = counts[top_source] / total
+
+        if top_share <= top_share_threshold:
+            return AnchoringDistributionReport(
+                warning=None,
+                summary=f"Anchoring distribution OK (top source S{top_source} share {top_share:.0%}).",
+            )
+
+        top_score = evidence_scores.get(top_source)
+        if top_score:
+            risk_str = f"(top source credibility={top_score.credibility:.1f}, specificity={top_score.specificity:.1f})"
+        else:
+            risk_str = "(no evidence score for top source)"
+
+        warning = (
+            f"⚠️ NARRATIVE ANCHORING RISK: Source [S{top_source}] accounts for {top_share:.0%} of all cited evidence. "
+            f"This can overfit the narrative to one event. Re-balance by citing and weighting multiple mechanisms/timelines. "
+            f"{risk_str}"
+        )
+
+        return AnchoringDistributionReport(
+            warning=warning,
+            summary=f"Anchoring risk detected (top source share {top_share:.0%}).",
+        )
+
+
+@dataclass
+class CausalCompletenessReport:
+    warning: Optional[str]
+    missing_components: List[str]
+    summary: str
+
+
+class CausalCompletenessChecker:
+    _MECHANISM_CONNECTORS = {
+        "due to",
+        "driven by",
+        "because",
+        "as a result",
+        "therefore",
+        "through",
+        "leading to",
+        "results in",
+        "caused by",
+        "contributes to",
+        "via",
+        "by reducing",
+        "by increasing",
+    }
+    _EVENT_SIGNALS = {
+        "merger", "acquisition", "acquire", "deal", "partnership", "ipo",
+        "announced", "reported", "layoff", "recall", "sanction", "ban",
+        "lawsuit", "settlement", "strike", "outage", "breach",
+    }
+    _MARKET_MEASURABLE = {"revenue", "profit", "loss", "margin", "earnings", "cost", "market cap", "price", "demand", "supply", "ebitda"}
+    _MARKET_VALUATION = {"valuation", "p/e", "pe", "ev", "dcf", "multiple", "ev/ebitda"}
+    _DILUTION_ACCRETION = {"dilution", "accretion"}
+    _ACQUISITION_FUNDING = {"acquisition", "funding", "raise", "funding round", "shares", "cap table"}
+
+    _RISK_MEASURABLE = {"severity", "failure rate", "incident", "downtime", "risk score", "penalty", "compliance cost", "breach"}
+    _RISK_STRATEGIC = {"strategy", "reputation", "market share", "competitive", "risk appetite", "regulatory"}
+
+    def _count_shallow_event_claims(self, draft_clean: str) -> int:
+        sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[.!?])\s+", draft_clean)
+            if len(s.strip()) > 20
+        ]
+        shallow = 0
+        for sent in sentences:
+            sent_lower = sent.lower()
+            if not any(ev in sent_lower for ev in self._EVENT_SIGNALS):
+                continue
+            has_mechanism = any(conn in sent_lower for conn in self._MECHANISM_CONNECTORS)
+            has_number = bool(re.search(r"\b\d+(?:\.\d+)?%|\$\s*\d", sent_lower))
+            if not has_mechanism and not has_number:
+                shallow += 1
+        return shallow
+
+    def check(self, draft: str, simulation_requirement: str, section_title: str) -> CausalCompletenessReport:
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        text_lower = (simulation_requirement + " " + section_title + " " + draft_clean).lower()
+
+        is_markets = any(k in text_lower for k in ["market", "valuation", "revenue", "profit", "earnings", "price", "stock"])
+
+        mechanism_present = any(conn in text_lower for conn in self._MECHANISM_CONNECTORS)
+        missing: List[str] = []
+        if not mechanism_present:
+            missing.append("mechanism (how/why the event changes outcomes)")
+
+        shallow_events = self._count_shallow_event_claims(draft_clean)
+        if shallow_events >= 2:
+            missing.append(
+                f"deep causal links ({shallow_events} event-only sentences lack mechanism→measurable impact)"
+            )
+        elif shallow_events == 1 and not mechanism_present:
+            missing.append("deep causal link for the primary event claim (mechanism + measurable impact)")
+
+        if is_markets:
+            measurable_present = any(k in text_lower for k in self._MARKET_MEASURABLE) or bool(
+                re.search(r'\b\d+(?:\.\d+)?\s*%|\$\s*\d', text_lower)
+            )
+            if not measurable_present:
+                missing.append("measurable impact (revenue/cost/margins/price, with numbers where possible)")
+
+            valuation_present = any(k in text_lower for k in self._MARKET_VALUATION)
+            if not valuation_present:
+                missing.append("valuation consequence (valuation metric or multiple)")
+
+            needs_dilution = any(k in text_lower for k in self._ACQUISITION_FUNDING)
+            if needs_dilution and not any(k in text_lower for k in self._DILUTION_ACCRETION):
+                missing.append("dilution/accretion math (if acquisition/funding is discussed)")
+        else:
+            measurable_present = any(k in text_lower for k in self._RISK_MEASURABLE)
+            if not measurable_present:
+                missing.append("measurable operational impact (risk score, severity, downtime, penalties)")
+
+            strategic_present = any(k in text_lower for k in self._RISK_STRATEGIC)
+            if not strategic_present:
+                missing.append("strategic outcome (reputation/compliance/market share implications)")
+
+        if missing:
+            warning = (
+                "⚠️ CAUSAL CHAIN INCOMPLETE: Missing "
+                + "; ".join(missing)
+                + ". Expand as: event -> mechanism -> measurable impact -> valuation/strategic consequence."
+            )
+        else:
+            warning = None
+
+        summary = f"Causal chain coverage: {('OK' if not missing else 'Missing ' + str(len(missing)) + ' component(s)')}."
+        return CausalCompletenessReport(
+            warning=warning,
+            missing_components=missing[:5],
+            summary=summary,
+        )
+
+
+@dataclass
+class NumericalGroundingCoverageReport:
+    warning: Optional[str]
+    missing_components: List[str]
+    summary: str
+
+
+class NumericalGroundingCoverageChecker:
+    _SCENARIO_WORDS = {"scenario", "base case", "upside", "downside", "probability-weighted", "weighted outcome"}
+    _PROBABILITY_WORDS = {"probability", "probabilistic", "weighted", "probability-weighted", "% probability"}
+    _VALUATION_WORDS = {"valuation", "p/e", "pe", "ev", "dcf", "multiple", "ev/ebitda"}
+    _SENSITIVITY_WORDS = {"sensitivity", "what-if", "range analysis", "sensitivity analysis"}
+    _DILUTION_WORDS = {"dilution", "accretion"}
+    _ACQUISITION_FUNDING_WORDS = {"acquisition", "funding", "raise", "cap table", "shares"}
+
+    _HAS_NUMBER_RE = re.compile(r'\b\d+(?:\.\d+)?\b')
+
+    def check(self, draft: str, simulation_requirement: str, section_title: str) -> NumericalGroundingCoverageReport:
+        draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
+        text_lower = (simulation_requirement + " " + section_title + " " + draft_clean).lower()
+
+        has_any_numbers = bool(self._HAS_NUMBER_RE.search(text_lower))
+        has_scenario = any(w in text_lower for w in self._SCENARIO_WORDS)
+        has_probability = any(w in text_lower for w in self._PROBABILITY_WORDS)
+        has_valuation = any(w in text_lower for w in self._VALUATION_WORDS)
+        has_sensitivity = any(w in text_lower for w in self._SENSITIVITY_WORDS)
+        has_dilution = any(w in text_lower for w in self._DILUTION_WORDS)
+        has_acquisition_funding = any(w in text_lower for w in self._ACQUISITION_FUNDING_WORDS)
+
+        missing: List[str] = []
+
+        if has_valuation and not has_any_numbers:
+            missing.append("valuation consequence quantified with numbers ($/multiples/%, etc.)")
+
+        if (has_scenario or has_valuation) and not has_probability:
+            missing.append("probability-weighted outcomes (scenario probabilities or % probability labels)")
+
+        if has_acquisition_funding and not has_dilution:
+            missing.append("dilution/accretion math or cap-table impact terms")
+
+        # Flag sensitivity only when scenario/range language is already present.
+        if (has_scenario or "range" in text_lower) and not has_sensitivity:
+            missing.append("sensitivity analysis (what changes under alternative assumptions)")
+
+        if missing:
+            warning = (
+                "⚠️ NUMERICAL GROUNDING INCOMPLETE: Missing "
+                + "; ".join(missing)
+                + ". Add probability-weighted outcomes and at least one transparent numeric impact path."
+            )
+        else:
+            warning = None
+
+        summary = f"Numerical grounding coverage: {('OK' if not missing else 'Missing ' + str(len(missing)) + ' component(s)')}."
+        return NumericalGroundingCoverageReport(
+            warning=warning,
+            missing_components=missing[:5],
+            summary=summary,
+        )
+
+
+@dataclass
+class ThesisBalanceReport:
+    """Checks whether the draft balances multiple driver classes instead of one theme."""
+    buckets_present: List[str]
+    buckets_missing: List[str]
+    dominant_bucket: Optional[str]
+    warning: Optional[str]
+    summary: str
+
+
+class ThesisBalanceChecker:
+    """
+    Ensures synthesis covers structural, cyclical, temporary, macro, and fundamental
+    drivers rather than anchoring on a single retrieved narrative theme.
+    """
+
+    _DRIVER_BUCKETS: Dict[str, List[str]] = {
+        "structural": [
+            "structural", "long-term", "secular", "competitive", "market structure",
+            "moat", "industry", "regulatory framework", "supply chain",
+        ],
+        "cyclical": [
+            "cyclical", "cycle", "seasonal", "inventory cycle", "demand cycle",
+            "upturn", "downturn", "recession", "recovery",
+        ],
+        "temporary": [
+            "temporary", "one-off", "short-term", "headline", "episodic",
+            "this quarter", "this month", "breaking", "announcement",
+        ],
+        "macro": [
+            "macro", "gdp", "inflation", "interest rate", "monetary", "fiscal",
+            "geopolitical", "tariff", "currency", "central bank",
+        ],
+        "fundamentals": [
+            "fundamental", "earnings", "revenue", "margin", "cash flow",
+            "balance sheet", "valuation", "p/e", "ebitda", "unit economics",
+        ],
+    }
+
+    _MARKET_CONTEXT_KEYWORDS = {
+        "market", "valuation", "revenue", "stock", "earnings", "financial", "investment",
+    }
+
+    def check(
+        self,
+        draft: str,
+        simulation_requirement: str,
+        section_title: str,
+        min_buckets: int = 3,
+    ) -> ThesisBalanceReport:
+        draft_clean = re.sub(r"<self_critique>.*?</self_critique>", "", draft, flags=re.DOTALL)
+        context_lower = (simulation_requirement + " " + section_title).lower()
+        text_lower = (context_lower + " " + draft_clean).lower()
+
+        is_market_context = any(k in context_lower for k in self._MARKET_CONTEXT_KEYWORDS)
+        required_buckets = min_buckets if is_market_context else 2
+
+        present: List[str] = []
+        missing: List[str] = []
+        bucket_hits: Dict[str, int] = {}
+
+        for bucket, keywords in self._DRIVER_BUCKETS.items():
+            hits = sum(1 for kw in keywords if kw in text_lower)
+            bucket_hits[bucket] = hits
+            if hits > 0:
+                present.append(bucket)
+            else:
+                missing.append(bucket)
+
+        dominant_bucket = None
+        if bucket_hits:
+            top_bucket, top_hits = max(bucket_hits.items(), key=lambda kv: kv[1])
+            total_hits = sum(bucket_hits.values()) or 1
+            if top_hits >= 3 and (top_hits / total_hits) > 0.55:
+                dominant_bucket = top_bucket
+
+        warning = None
+        if len(present) < required_buckets:
+            warning = (
+                f"⚠️ THESIS IMBALANCE: Only {len(present)}/{len(self._DRIVER_BUCKETS)} driver classes "
+                f"represented ({', '.join(present) or 'none'}). Missing: {', '.join(missing)}. "
+                "Balance structural, cyclical, temporary, macro, and fundamental drivers — "
+                "do not center the section on one retrieved headline theme."
+            )
+        elif dominant_bucket:
+            warning = (
+                f"⚠️ THESIS CONCENTRATION: Driver class '{dominant_bucket}' dominates the narrative. "
+                "Explicitly integrate at least one contrasting driver (e.g., cyclical vs structural, "
+                "temporary event vs fundamentals) before finalizing."
+            )
+
+        if warning:
+            summary = f"Thesis balance: {len(present)} buckets present; dominant={dominant_bucket or 'none'}."
+        else:
+            summary = f"Thesis balance OK ({len(present)} driver classes represented)."
+
+        return ThesisBalanceReport(
+            buckets_present=present,
+            buckets_missing=missing,
+            dominant_bucket=dominant_bucket,
+            warning=warning,
+            summary=summary,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
+# Epistemic review pass (post-generation discrimination)
+# ═══════════════════════════════════════════════════════════════
+
+
+@dataclass
+class EpistemicReviewReport:
+    """Post-generation epistemic critique: signal vs noise, primary vs secondary evidence."""
+    evidence_quality_collapse: bool
+    overconfident_low_tier_sentences: List[str]
+    missing_primary_anchor: bool
+    low_tier_citation_share: float
+    critique_questions: List[str]
+    warning: Optional[str]
+    summary: str
+
+
+class EpistemicReviewChecker:
+    """
+    Asks whether the draft over-synthesizes weak epistemic tiers into strategic certainty.
+    """
+
+    _CITATION_RE = re.compile(r"\[[Ss]\s*(\d+)\]")
+    _CONFIDENT_KEYWORDS = {
+        "will", "definitely", "clearly", "obviously", "certainly", "proves",
+        "undoubtedly", "always", "must", "guaranteed",
+    }
+    _TENTATIVE_TIERS = {"RETAIL_COMMENTARY", "SOCIAL_OPINION", "SPECULATIVE"}
+    _PRIMARY_TIERS = {"SIMULATION_PRIMARY", "INSTITUTIONAL", "PROFESSIONAL"}
+
+    def check(self, draft: str, evidence_scores: Dict[int, Any]) -> EpistemicReviewReport:
+        from .epistemic_discriminator import EpistemicDiscriminator
+
+        draft_clean = re.sub(r"<self_critique>.*?</self_critique>", "", draft, flags=re.DOTALL)
+        citations = [int(m.group(1)) for m in self._CITATION_RE.finditer(draft_clean)]
+
+        tier_rank_by_num: Dict[int, int] = {}
+        tier_by_num: Dict[int, str] = {}
+        for num, score in evidence_scores.items():
+            tier = getattr(score, "epistemic_tier", "PROFESSIONAL")
+            tier_by_num[num] = tier
+            tier_rank_by_num[num] = EpistemicDiscriminator._TIER_META.get(tier, (2,))[0]
+
+        low_tier_cites = 0
+        primary_cites = 0
+        for c in citations:
+            tier = tier_by_num.get(c, "PROFESSIONAL")
+            if tier in self._TENTATIVE_TIERS or tier == "ANALYST_ACTION":
+                low_tier_cites += 1
+            if tier in self._PRIMARY_TIERS:
+                primary_cites += 1
+
+        total_cites = len(citations) or 1
+        low_tier_share = low_tier_cites / total_cites
+        evidence_quality_collapse = low_tier_share > 0.45 and total_cites >= 4
+        missing_primary_anchor = primary_cites == 0 and total_cites >= 3
+
+        overconfident_low: List[str] = []
+        for sent in re.split(r"(?<=[.!?])\s+", draft_clean):
+            sent = sent.strip()
+            if len(sent) < 25:
+                continue
+            cited = {int(m.group(1)) for m in self._CITATION_RE.finditer(sent)}
+            if not cited:
+                continue
+            sent_lower = sent.lower()
+            if not any(w in sent_lower for w in self._CONFIDENT_KEYWORDS):
+                continue
+            worst_rank = max(tier_rank_by_num.get(n, 2) for n in cited)
+            if worst_rank >= 4:
+                overconfident_low.append(sent[:180] + ("…" if len(sent) > 180 else ""))
+
+        critique_questions = [
+            "Is each central claim supported by SIMULATION_PRIMARY, INSTITUTIONAL, or PROFESSIONAL evidence?",
+            "Are LinkedIn comments, retail media, or analyst target changes relegated to tentative context only?",
+            "Is any conclusion overstated relative to the weakest cited epistemic tier?",
+            "Are alternative explanations and counter-scenarios explicitly stated?",
+            "Is the section overfitting to one salient retrieved narrative?",
+        ]
+
+        warnings: List[str] = []
+        if evidence_quality_collapse:
+            warnings.append(
+                f"Evidence quality collapse: {low_tier_share:.0%} of citations are "
+                "retail/social/speculative/analyst-only sources"
+            )
+        if missing_primary_anchor:
+            warnings.append(
+                "No primary-eligible epistemic tier (simulation/institutional/professional) cited — "
+                "thesis may rest on weak commentary"
+            )
+        if overconfident_low:
+            warnings.append(
+                f"{len(overconfident_low)} confident claim(s) cite only low-epistemic-tier sources"
+            )
+
+        warning = None
+        if warnings:
+            warning = "⚠️ EPISTEMIC REVIEW: " + "; ".join(warnings)
+
+        summary = (
+            f"Epistemic review: low-tier cite share {low_tier_share:.0%}, "
+            f"primary anchors={'yes' if primary_cites else 'no'}, "
+            f"overconfident low-tier={len(overconfident_low)}"
+        )
+
+        return EpistemicReviewReport(
+            evidence_quality_collapse=evidence_quality_collapse,
+            overconfident_low_tier_sentences=overconfident_low[:5],
+            missing_primary_anchor=missing_primary_anchor,
+            low_tier_citation_share=low_tier_share,
+            critique_questions=critique_questions,
+            warning=warning,
+            summary=summary,
+        )
+
+
+# ═══════════════════════════════════════════════════════════════
 # Analytical Report Aggregator
 # ═══════════════════════════════════════════════════════════════
 
@@ -1029,6 +1817,13 @@ class AnalyticalReport:
     numerical_sanity: NumericalSanityReport
     specificity: SpecificityReport
     confidence: ConfidenceReport
+    evidence_alignment: EvidenceAlignmentReport
+    anchoring: AnchoringDistributionReport
+    causal_completeness: CausalCompletenessReport
+    numerical_grounding_coverage: NumericalGroundingCoverageReport
+    thesis_balance: Optional[ThesisBalanceReport] = None
+    skepticism: Optional[SkepticismReport] = None
+    epistemic_review: Optional[EpistemicReviewReport] = None
 
     def to_composer_block(self) -> str:
         lines = ["[Analytical Audit Results — issues requiring immediate resolution]"]
@@ -1044,7 +1839,21 @@ class AnalyticalReport:
             warnings.append(self.specificity.warning)
         if self.confidence.warning:
             warnings.append(self.confidence.warning)
-            
+        if self.evidence_alignment.warning:
+            warnings.append(self.evidence_alignment.warning)
+        if self.anchoring.warning:
+            warnings.append(self.anchoring.warning)
+        if self.causal_completeness.warning:
+            warnings.append(self.causal_completeness.warning)
+        if self.numerical_grounding_coverage.warning:
+            warnings.append(self.numerical_grounding_coverage.warning)
+        if self.skepticism and self.skepticism.warning:
+            warnings.append(self.skepticism.warning)
+        if self.thesis_balance and self.thesis_balance.warning:
+            warnings.append(self.thesis_balance.warning)
+        if self.epistemic_review and self.epistemic_review.warning:
+            warnings.append(self.epistemic_review.warning)
+
         if warnings:
             lines.append("Audit Warnings:")
             for w in warnings:
@@ -1082,9 +1891,88 @@ class AnalyticalReport:
             for s in self.confidence.overconfident_unbacked_claims:
                 lines.append(f"  - {s}")
 
+        if self.skepticism and self.skepticism.mismatches:
+            lines.append("\nEvidence-Confidence Mismatches to resolve (hedge or check sources):")
+            for m in self.skepticism.mismatches:
+                lines.append(f"  - {m}")
+
+        if self.evidence_alignment.unsupported_sentences:
+            lines.append("\nEvidence Alignment Failures (cited claim likely not present in cited evidence):")
+            for s in self.evidence_alignment.unsupported_sentences:
+                lines.append(f"  - {s}")
+
+        if self.causal_completeness.missing_components:
+            lines.append("\nCausal chain gaps to expand (event → mechanism → measurable → valuation):")
+            for m in self.causal_completeness.missing_components:
+                lines.append(f"  - {m}")
+
+        if self.thesis_balance and self.thesis_balance.buckets_missing:
+            lines.append(
+                f"\nThesis balance — integrate missing driver lenses: {', '.join(self.thesis_balance.buckets_missing[:4])}"
+            )
+
+        if self.epistemic_review:
+            if self.epistemic_review.overconfident_low_tier_sentences:
+                lines.append(
+                    "\nOverconfident claims on weak epistemic sources (hedge, downgrade, or re-cite):"
+                )
+                for s in self.epistemic_review.overconfident_low_tier_sentences:
+                    lines.append(f"  - {s}")
+            lines.append("\n[Epistemic critique — answer in revised prose]")
+            for q in self.epistemic_review.critique_questions:
+                lines.append(f"  - {q}")
+
         lines.append(f"\nSource Quality Map: {self.credibility.summary}")
 
         return "\n".join(lines)
+
+    def severity_score(self) -> int:
+        """Higher = more audit failures requiring aggressive rewrite."""
+        score = 0
+        if self.confidence.warning:
+            score += 2
+        if self.skepticism and self.skepticism.warning:
+            score += 2
+        if self.epistemic_review and self.epistemic_review.warning:
+            score += 2
+        if self.anchoring.warning:
+            score += 1
+        if self.evidence_alignment.warning:
+            score += 1
+        score += len(self.confidence.overconfident_unbacked_claims)
+        score += len(self.confidence.uncalibrated_speculations)
+        if self.skepticism:
+            score += len(self.skepticism.mismatches)
+        if self.epistemic_review:
+            score += len(self.epistemic_review.overconfident_low_tier_sentences)
+        return score
+
+    def requires_confidence_rewrite(self, threshold: int = 3) -> bool:
+        return self.severity_score() >= threshold
+
+    def to_composer_block_with_evidence(
+        self,
+        evidence_scores: Optional[Dict[int, Any]] = None,
+    ) -> str:
+        block = self.to_composer_block()
+        if not evidence_scores:
+            return block
+        scores = list(evidence_scores.values())
+        if not scores:
+            return block
+        from .evidence_evaluator import EvidenceEvaluator
+
+        evaluator = EvidenceEvaluator()
+        profile = evaluator.compute_section_profile(scores)
+        extra = [
+            "",
+            evaluator.build_confidence_governed_block(profile),
+            evaluator.build_narrative_weight_allocation(scores),
+        ]
+        mandate = evaluator.build_synthesis_mandate(scores)
+        if mandate:
+            extra.append(mandate)
+        return block + "\n" + "\n".join(extra)
 
 
 class ReportStatus(str, Enum):
@@ -1395,17 +2283,34 @@ To ensure rigorous, defensible, and analytical prediction reasoning instead of r
      - **Bull Scenario** (upside trajectory, probability band, e.g., 10%)
      - For each scenario, state the exact falsifiable trigger condition (what specific agent actions or metrics would shift the system into this scenario).
 
-4. [Source Credibility and Evidence Weighting Hierarchy]
-   - Weigh retrieved evidence based on source quality. Use the following hierarchy:
-     - **HIGH Credibility**: `interview_agents` (direct raw opinions) and `insight_forge` (cross-referenced multidimensional metrics)
-     - **MEDIUM Credibility**: `panorama_search` (breadth search) and `quick_search` (light semantic matches)
-     - **LOW Credibility**: `web_search` (external ground truth comparing baselines, not simulated agents) and single isolated agent statements.
-   - If a claim rests on a single low-credibility source, explicitly state: "(Note: this claim relies on a single unverified source [Sn])."
-   - Do NOT treat all retrieved assertions equally.
+4. [Epistemic Discrimination — evidence hierarchy is mandatory]
+   - Each observation includes an **Epistemic tier** (SIMULATION_PRIMARY → INSTITUTIONAL → PROFESSIONAL → ANALYST_ACTION → RETAIL_COMMENTARY → SOCIAL_OPINION → SPECULATIVE).
+   - **Never blend tiers at equal narrative weight.** LinkedIn comments, retail finance blogs, analyst rating changes, and speculative reactions are tentative context only — not proof of strategic conclusions.
+   - Central claims require SIMULATION_PRIMARY, INSTITUTIONAL, or PROFESSIONAL tiers when available.
+   - Mark low-tier citations explicitly: "(tentative sentiment / low epistemic weight)".
+   - If a claim rests on a single low-tier source, state that limitation and do not imply certainty.
 
 5. [Retrieval Contamination Guardrail]
    - No single source may anchor more than ~40% of the section's factual claims.
    - If a single retrieved headline or agent statement dominates, you must broaden your retrieval using other tools or explicitly flag the retrieval bias as an analytical constraint.
+
+5b. [Thesis Balancing — multi-driver synthesis]
+   - Balance structural drivers, cyclical drivers, temporary/episodic events, macro conditions, and company fundamentals.
+   - Do NOT center the entire section on one salient retrieved theme (e.g., a single merger headline).
+   - Episodic events belong in context, not as the sole thesis.
+
+5c. [Confidence-Governed Synthesis — behavioral, not descriptive]
+   - Follow the [PRE-SYNTHESIS EPISTEMIC MANDATE] and [NARRATIVE WEIGHT ALLOCATION] blocks when present.
+   - Match assertion strength and recommendation aggressiveness to the section confidence ceiling.
+   - synthesis_weight controls how much emphasis each source receives — override retrieval salience.
+   - Tentative-only sources (social/retail/speculative) cannot anchor strategic conclusions.
+
+6. [Quantitative and Valuation Grounding Requirement]
+   - Ground central arguments in concrete quantitative and valuation metrics. Do NOT rely on vague qualitative speculation.
+   - Wherever relevant, explicitly provide or estimate:
+     - Revenue/market sizing impact (exact numbers, percentages, or USD/currency values)
+     - Dilution/accretion and business operational outcomes (e.g., costs, margins, compliance overheads)
+     - Probability weighting for alternative trajectories (e.g. "with high confidence (70% probability based on S2)")
 
 ═══════════════════════════════════════════════════════════════
 [Temporal Relevance Rules]
@@ -1637,6 +2542,8 @@ Here is an initial draft generated by the planning agent:
    - Preserve the rigorous analytical, probabilistic, and uncertainty-aware tone of the draft.
    - Maintain a clear distinction between verified facts, logical inferences, and speculative scenarios.
    - Retain explicit confidence calibration, alternative scenarios, falsifiability metrics, and risk analysis without smoothing them over into generic overconfident retail prose.
+   - Anti-Anchoring Guardrail: Do NOT let a single highly salient retrieved event or agent statement dominate the final narrative unless corroborated by other high-credibility sources. Weight your arguments proportionally based on the source quality weights in the audit/digest.
+   - Enforce quantitative grounding: Ensure central assertions cite revenue numbers, cost impacts, market sizing, or exact probability weights. If missing, explicitly mention that "the exact valuation impact remains unobserved in simulation".
 9. [Temporal Accuracy]
    - Each observation block starts with a [Temporal Context] header. Use it to determine data freshness.
    - Append "as of [date]" to key statistics, sentiment figures, prices, and regulatory facts when a date is available.
@@ -1659,6 +2566,43 @@ Critic & Revision Rules:
 4. Explicitly add uncertainty labels and confidence levels (e.g. "with high confidence", "moderately likely", "highly speculative") to speculative claims.
 5. Back up any highly confident claims with source citation references before stripping the citation tags.
 6. Preserve proper analytical hedging; do NOT convert a conditional/hedged statement into an overconfident claim.
+
+[Confidence-Governed Synthesis — mandatory behavioral enforcement]
+{confidence_governance}
+- Match assertion strength, phrasing intensity, and recommendation aggressiveness to the section confidence ceiling above.
+- Weight narrative emphasis by synthesis_weight allocation — not by retrieval salience or headline drama.
+- Downrank tentative-only sources in conclusions; never promote social/retail commentary to strategic certainty.
+"""
+
+CONFIDENCE_REWRITE_USER_TEMPLATE = """\
+You are performing a mandatory confidence-adjusted rewrite of one report section.
+
+Section: {section_title}
+
+[Simulation scenario]
+{simulation_requirement}
+
+[Ground-truth observations]
+{observations}
+
+[Current section — overconfident or mis-calibrated]
+{current_content}
+
+[Automated audit — every item MUST be fixed in the rewrite]
+{analytical_issues}
+
+[Confidence-governed synthesis rules]
+{confidence_governance}
+
+[Rewrite instructions — aggressive enforcement]
+1. Rewrite the entire section to comply with the confidence ceiling and narrative weight allocation.
+2. Replace definitive language backed by weak/low-weight sources with calibrated hedging and explicit uncertainty.
+3. Demote episodic headlines (mergers, spikes, viral reactions) to context; elevate structural, high-weight drivers.
+4. Add missing probability bands, sensitivity caveats, and quantified ranges where the audit flags gaps.
+5. Resolve contradictions and numerical anomalies — do not smooth them away silently.
+6. Preserve block quotes and simulation-grounded facts; strip all [SN] citation tags from output.
+7. Do NOT use Markdown headings (# ## ###). Use **bold** for emphasis only.
+8. Output ONLY the revised section body — no preamble, no "Final Answer:", no critique block.
 """
 
 # ── ReACT loop message templates ──
@@ -1764,7 +2708,15 @@ class ReportAgent:
         self._numerical_sanity_checker = NumericalSanityChecker()
         self._specificity_detector = SpecificityDetector()
         self._confidence_checker = ConfidenceCoverageChecker()
-        
+        self._evidence_evaluator = EvidenceEvaluator()
+        self._skepticism_checker = SkepticismChecker()
+        self._evidence_alignment_checker = EvidenceAlignmentChecker()
+        self._anchoring_distribution_checker = AnchoringDistributionChecker()
+        self._causal_completeness_checker = CausalCompletenessChecker()
+        self._numerical_grounding_coverage_checker = NumericalGroundingCoverageChecker()
+        self._thesis_balance_checker = ThesisBalanceChecker()
+        self._epistemic_review_checker = EpistemicReviewChecker()
+
         self.tools = self._define_tools()
         self.report_logger: Optional[ReportLogger] = None
         self.console_logger: Optional[ReportConsoleLogger] = None
@@ -1995,31 +2947,82 @@ class ReportAgent:
                 desc_parts.append(f"  Parameters: {params_desc}")
         return "\n".join(desc_parts)
 
+    def _build_evidence_guidance(
+        self,
+        evidence_scores: List[Any],
+        section_title: str,
+        *,
+        include_mandate: bool = False,
+    ) -> str:
+        """Append ranked digest and pre-synthesis mandate to ReACT user messages."""
+        parts: List[str] = []
+        concentration_warning = self._evidence_evaluator.detect_concentration(evidence_scores)
+        if concentration_warning:
+            parts.append(concentration_warning)
+        if len(evidence_scores) >= 2:
+            parts.append(self._evidence_evaluator.build_epistemic_hierarchy(evidence_scores))
+        if len(evidence_scores) >= 3:
+            parts.append(self._evidence_evaluator.build_digest(evidence_scores))
+        if include_mandate or len(evidence_scores) >= 2:
+            mandate = self._evidence_evaluator.build_synthesis_mandate(
+                evidence_scores, section_title=section_title
+            )
+            if mandate:
+                parts.append(mandate)
+        elif len(evidence_scores) == 1:
+            profile = self._evidence_evaluator.compute_section_profile(evidence_scores)
+            parts.append(self._evidence_evaluator.build_confidence_governed_block(profile))
+        if not parts:
+            return ""
+        return "\n\n" + "\n\n".join(parts)
+
+    def _build_confidence_governance_block(
+        self,
+        evidence_scores: Optional[Dict[int, Any]],
+    ) -> str:
+        if not evidence_scores:
+            return (
+                "(No evidence scores — default to hedged, simulation-grounded language; "
+                "avoid definitive strategic claims.)"
+            )
+        scores = list(evidence_scores.values())
+        if not scores:
+            return "(No evidence scores — use exploratory tone.)"
+        profile = self._evidence_evaluator.compute_section_profile(scores)
+        parts = [
+            self._evidence_evaluator.build_confidence_governed_block(profile),
+            self._evidence_evaluator.build_narrative_weight_allocation(scores),
+        ]
+        return "\n".join(parts)
+
     def _compose_final_section(
         self,
         section: ReportSection,
         draft: str,
         observation_log: List[str],
         analytical_report: Optional[AnalyticalReport] = None,
+        evidence_scores: Optional[Dict[int, Any]] = None,
     ) -> str:
         """Use the composer LLM to write the final polished markdown for the section."""
         if not Config.REPORT_USE_COMPOSER:
             return draft
 
         logger.info(f"[Composer] Composing final polished markdown for section: {section.title}")
-        
+
         composer_system = (
             "You are a senior analyst composing one section of a prediction report.\n"
             "Write polished markdown only. Do not call tools, do not output JSON.\n"
             "Never use Markdown headings (#, ##, ###) in your response; use **bold text** for sub-sections instead.\n"
+            "Confidence-governed synthesis is mandatory: match tone and recommendations to evidence weights and ceilings.\n"
             f"{get_language_instruction()}"
         )
 
         if analytical_report:
             if isinstance(analytical_report, AnalyticalReport):
-                analytical_issues = analytical_report.to_composer_block()
+                analytical_issues = analytical_report.to_composer_block_with_evidence(
+                    evidence_scores
+                )
             else:
-                # Fallback if a GroundingReport is passed
                 analytical_issues = f"[Grounding note — action required]\n{analytical_report.summary}"
                 if getattr(analytical_report, 'warning', None):
                     analytical_issues += f"\nWarning: {analytical_report.warning}"
@@ -2028,12 +3031,15 @@ class ReportAgent:
         else:
             analytical_issues = "(No automated audit results available. Ensure general analytical rigor and grounding.)"
 
+        confidence_governance = self._build_confidence_governance_block(evidence_scores)
+
         composer_user = COMPOSER_USER_TEMPLATE.format(
             section_title=section.title,
             simulation_requirement=self.simulation_requirement,
             observations="\n\n---\n\n".join(observation_log) if observation_log else "(No tool observations recorded for this section)",
             draft=draft,
             analytical_issues=analytical_issues,
+            confidence_governance=confidence_governance,
         )
 
         try:
@@ -2053,6 +3059,120 @@ class ReportAgent:
         except Exception as e:
             logger.error(f"[Composer] Hand-off failed, falling back to original draft: {e}")
             return draft
+
+    def _confidence_adjusted_rewrite(
+        self,
+        section: ReportSection,
+        content: str,
+        analytical_report: AnalyticalReport,
+        observation_log: List[str],
+        evidence_scores: Optional[Dict[int, Any]] = None,
+    ) -> str:
+        """Second-pass rewrite when audit flags overconfidence or epistemic collapse."""
+        if not Config.REPORT_USE_COMPOSER:
+            return content
+
+        logger.info(
+            f"[ConfidenceRewrite] Section '{section.title}' severity={analytical_report.severity_score()}"
+        )
+
+        rewrite_system = (
+            "You are a senior analyst enforcing confidence-governed analytical reasoning.\n"
+            "Rewrite to fix every audit issue; downgrade overconfident prose aggressively.\n"
+            "Never use Markdown headings. Output section body only.\n"
+            f"{get_language_instruction()}"
+        )
+
+        confidence_governance = self._build_confidence_governance_block(evidence_scores)
+        analytical_issues = analytical_report.to_composer_block_with_evidence(evidence_scores)
+
+        rewrite_user = CONFIDENCE_REWRITE_USER_TEMPLATE.format(
+            section_title=section.title,
+            simulation_requirement=self.simulation_requirement,
+            observations="\n\n---\n\n".join(observation_log) if observation_log else "(No observations)",
+            current_content=content,
+            analytical_issues=analytical_issues,
+            confidence_governance=confidence_governance,
+        )
+
+        try:
+            revised = self.composer_llm.chat(
+                messages=[
+                    {"role": "system", "content": rewrite_system},
+                    {"role": "user", "content": rewrite_user},
+                ],
+                temperature=0.25,
+                max_tokens=Config.LLM_CHAT_MAX_TOKENS,
+            )
+            if revised and revised.strip():
+                cleaned = re.sub(r'^#+\s+.*?\n', '', revised.strip())
+                return cleaned.strip()
+        except Exception as e:
+            logger.error(f"[ConfidenceRewrite] Failed for {section.title}: {e}")
+        return content
+
+    def _finalize_section_with_governance(
+        self,
+        section: ReportSection,
+        draft: str,
+        observation_log: List[str],
+        audit_report: AnalyticalReport,
+        tool_calls_count: int,
+        sources_metadata: List[Tuple[int, str, str]],
+        evidence_scores: Optional[Dict[int, Any]],
+        section_index: int,
+    ) -> str:
+        """Composer polish, optional confidence rewrite, and audit metrics."""
+        final_answer = self._compose_final_section(
+            section,
+            draft,
+            observation_log,
+            audit_report,
+            evidence_scores=evidence_scores,
+        )
+
+        post_audit = self._run_analytical_audit(
+            final_answer,
+            tool_calls_count,
+            sources_metadata,
+            section.title,
+            evidence_scores=evidence_scores,
+        )
+        combined_severity = max(audit_report.severity_score(), post_audit.severity_score())
+        if combined_severity >= 3 or post_audit.requires_confidence_rewrite():
+            merged = AnalyticalReport(
+                grounding=post_audit.grounding,
+                credibility=post_audit.credibility,
+                contradictions=post_audit.contradictions,
+                numerical_sanity=post_audit.numerical_sanity,
+                specificity=post_audit.specificity,
+                confidence=post_audit.confidence,
+                evidence_alignment=post_audit.evidence_alignment,
+                anchoring=post_audit.anchoring,
+                causal_completeness=post_audit.causal_completeness,
+                numerical_grounding_coverage=post_audit.numerical_grounding_coverage,
+                thesis_balance=post_audit.thesis_balance,
+                skepticism=post_audit.skepticism,
+                epistemic_review=post_audit.epistemic_review,
+            )
+            if merged.requires_confidence_rewrite(threshold=2):
+                final_answer = self._confidence_adjusted_rewrite(
+                    section,
+                    final_answer,
+                    merged,
+                    observation_log,
+                    evidence_scores,
+                )
+
+        self._log_analytical_audit_metrics(
+            section.title,
+            section_index,
+            audit_report,
+            final_answer,
+            tool_calls_count,
+            sources_metadata,
+        )
+        return final_answer
 
     def _select_analytical_module(self, section_title: str) -> Any:
         text = (self.simulation_requirement + " " + section_title).lower()
@@ -2079,6 +3199,7 @@ class ReportAgent:
         tool_calls_count: int,
         sources_metadata: List[Tuple[int, str, str]],
         section_title: str = "",
+        evidence_scores: Optional[Dict[int, Any]] = None,
     ) -> AnalyticalReport:
         module = self._select_analytical_module(section_title)
         grounding = self._grounding_verifier.check(final_answer, tool_calls_count)
@@ -2087,14 +3208,61 @@ class ReportAgent:
         numerical_sanity = self._numerical_sanity_checker.check(final_answer, sources_metadata, module)
         specificity = self._specificity_detector.check(final_answer, module)
         confidence = self._confidence_checker.check(final_answer)
-        
+
+        # Reconstruct evidence_scores on the fly if not provided
+        if evidence_scores is None:
+            evidence_scores = {}
+            for num, tool_name, result in sources_metadata:
+                fresh_score = 0.7
+                try:
+                    fc = self._temporal_filter.classify_topic(f"{self.simulation_requirement} {section_title}")
+                    dates = self._temporal_filter.extract_dates(result)
+                    fresh_score, _ = self._temporal_filter.score_freshness(dates, fc)
+                except Exception:
+                    pass
+                score = self._evidence_evaluator.score_evidence(
+                    source_num=num,
+                    raw_result=result,
+                    tool_name=tool_name,
+                    section_title=section_title,
+                    simulation_requirement=self.simulation_requirement,
+                    freshness_score=fresh_score
+                )
+                evidence_scores[num] = score
+
+        evidence_alignment = self._evidence_alignment_checker.check(
+            final_answer, sources_metadata, evidence_scores
+        )
+        anchoring = self._anchoring_distribution_checker.check(
+            final_answer, evidence_scores
+        )
+        causal_completeness = self._causal_completeness_checker.check(
+            final_answer, self.simulation_requirement, section_title
+        )
+        numerical_grounding_coverage = self._numerical_grounding_coverage_checker.check(
+            final_answer, self.simulation_requirement, section_title
+        )
+
+        skepticism = self._skepticism_checker.check(final_answer, evidence_scores)
+        thesis_balance = self._thesis_balance_checker.check(
+            final_answer, self.simulation_requirement, section_title
+        )
+        epistemic_review = self._epistemic_review_checker.check(final_answer, evidence_scores)
+
         return AnalyticalReport(
             grounding=grounding,
             credibility=credibility,
             contradictions=contradictions,
             numerical_sanity=numerical_sanity,
             specificity=specificity,
-            confidence=confidence
+            confidence=confidence,
+            evidence_alignment=evidence_alignment,
+            anchoring=anchoring,
+            causal_completeness=causal_completeness,
+            numerical_grounding_coverage=numerical_grounding_coverage,
+            thesis_balance=thesis_balance,
+            skepticism=skepticism,
+            epistemic_review=epistemic_review,
         )
 
     def _log_analytical_audit_metrics(
@@ -2360,6 +3528,8 @@ class ReportAgent:
         all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents", "web_search"}
         observation_log = []
         sources_metadata: List[Tuple[int, str, str]] = []
+        evidence_scores = []
+        evidence_scores_dict = {}
 
         # Report context, used for sub-question generation in InsightForge
         report_context = f"Section Title: {section.title}\nSimulation Requirement: {self.simulation_requirement}"
@@ -2467,7 +3637,13 @@ class ReportAgent:
                 final_answer = response.split("Final Answer:")[-1].strip()
                 logger.info(t('report.sectionGenDone', title=section.title, count=tool_calls_count))
 
-                audit_report = self._run_analytical_audit(final_answer, tool_calls_count, sources_metadata, section.title)
+                audit_report = self._run_analytical_audit(
+                    final_answer,
+                    tool_calls_count,
+                    sources_metadata,
+                    section.title,
+                    evidence_scores=evidence_scores_dict
+                )
                 logger.info(f"[Grounding] {section.title}: {audit_report.grounding.summary}")
                 if audit_report.grounding.warning:
                     logger.warning(f"[Grounding] {audit_report.grounding.warning}")
@@ -2480,10 +3656,15 @@ class ReportAgent:
                 if audit_report.confidence.warning:
                     logger.warning(f"[Confidence] {audit_report.confidence.warning}")
 
-                final_answer = self._compose_final_section(section, final_answer, observation_log, audit_report)
-
-                self._log_analytical_audit_metrics(
-                    section.title, section_index, audit_report, final_answer, tool_calls_count, sources_metadata
+                final_answer = self._finalize_section_with_governance(
+                    section,
+                    final_answer,
+                    observation_log,
+                    audit_report,
+                    tool_calls_count,
+                    sources_metadata,
+                    evidence_scores_dict,
+                    section_index,
                 )
 
                 if self.report_logger:
@@ -2499,14 +3680,17 @@ class ReportAgent:
             if has_tool_calls:
                 # Tool limit reached -> notify explicitly, ask for Final Answer
                 if tool_calls_count >= self.MAX_TOOL_CALLS_PER_SECTION:
+                    limit_msg = REACT_TOOL_LIMIT_MSG.format(
+                        tool_calls_count=tool_calls_count,
+                        max_tool_calls=self.MAX_TOOL_CALLS_PER_SECTION,
+                    )
+                    limit_msg += self._build_evidence_guidance(
+                        evidence_scores,
+                        section.title,
+                        include_mandate=True,
+                    )
                     messages.append({"role": "assistant", "content": response})
-                    messages.append({
-                        "role": "user",
-                        "content": REACT_TOOL_LIMIT_MSG.format(
-                            tool_calls_count=tool_calls_count,
-                            max_tool_calls=self.MAX_TOOL_CALLS_PER_SECTION,
-                        ),
-                    })
+                    messages.append({"role": "user", "content": limit_msg})
                     iteration += 1
                     continue
 
@@ -2545,6 +3729,19 @@ class ReportAgent:
                     )
                 annotated_result = annotation.header  # includes raw_result appended
 
+                # Score evidence and prepend evidence card
+                score = self._evidence_evaluator.score_evidence(
+                    source_num=tool_calls_count + 1,
+                    raw_result=result,
+                    tool_name=call["name"],
+                    section_title=section.title,
+                    simulation_requirement=self.simulation_requirement,
+                    freshness_score=annotation.freshness_score
+                )
+                evidence_scores.append(score)
+                evidence_scores_dict[tool_calls_count + 1] = score
+                annotated_result = self._evidence_evaluator.build_evidence_card(score, annotated_result)
+
                 observation_log.append(
                     f"Tool: {call['name']}\nParameters: {json.dumps(call.get('parameters', {}), ensure_ascii=False)}\nResult: {result}"
                 )
@@ -2567,6 +3764,12 @@ class ReportAgent:
                 unused_hint = ""
                 if unused_tools and tool_calls_count < self.MAX_TOOL_CALLS_PER_SECTION:
                     unused_hint = REACT_UNUSED_TOOLS_HINT.format(unused_list=", ".join(unused_tools))
+
+                unused_hint += self._build_evidence_guidance(
+                    evidence_scores,
+                    section.title,
+                    include_mandate=False,
+                )
 
                 messages.append({"role": "assistant", "content": response})
                 messages.append({
@@ -2608,7 +3811,13 @@ class ReportAgent:
             logger.info(t('report.sectionNoPrefix', title=section.title, count=tool_calls_count))
             final_answer = response.strip()
 
-            audit_report = self._run_analytical_audit(final_answer, tool_calls_count, sources_metadata, section.title)
+            audit_report = self._run_analytical_audit(
+                final_answer,
+                tool_calls_count,
+                sources_metadata,
+                section.title,
+                evidence_scores=evidence_scores_dict
+            )
             logger.info(f"[Grounding] {section.title}: {audit_report.grounding.summary}")
             if audit_report.grounding.warning:
                 logger.warning(f"[Grounding] {audit_report.grounding.warning}")
@@ -2621,10 +3830,15 @@ class ReportAgent:
             if audit_report.confidence.warning:
                 logger.warning(f"[Confidence] {audit_report.confidence.warning}")
 
-            final_answer = self._compose_final_section(section, final_answer, observation_log, audit_report)
-
-            self._log_analytical_audit_metrics(
-                section.title, section_index, audit_report, final_answer, tool_calls_count, sources_metadata
+            final_answer = self._finalize_section_with_governance(
+                section,
+                final_answer,
+                observation_log,
+                audit_report,
+                tool_calls_count,
+                sources_metadata,
+                evidence_scores_dict,
+                section_index,
             )
 
             if self.report_logger:
@@ -2638,7 +3852,12 @@ class ReportAgent:
         
         # Maximum iterations reached, force content generation
         logger.warning(t('report.sectionMaxIter', title=section.title))
-        messages.append({"role": "user", "content": REACT_FORCE_FINAL_MSG})
+        force_msg = REACT_FORCE_FINAL_MSG + self._build_evidence_guidance(
+            evidence_scores,
+            section.title,
+            include_mandate=True,
+        )
+        messages.append({"role": "user", "content": force_msg})
         
         response = self.llm.chat(
             messages=messages,
@@ -2655,7 +3874,13 @@ class ReportAgent:
         else:
             final_answer = response
 
-        audit_report = self._run_analytical_audit(final_answer, tool_calls_count, sources_metadata, section.title)
+        audit_report = self._run_analytical_audit(
+            final_answer,
+            tool_calls_count,
+            sources_metadata,
+            section.title,
+            evidence_scores=evidence_scores_dict
+        )
         logger.info(f"[Grounding] {section.title}: {audit_report.grounding.summary}")
         if audit_report.grounding.warning:
             logger.warning(f"[Grounding] {audit_report.grounding.warning}")
@@ -2668,13 +3893,17 @@ class ReportAgent:
         if audit_report.confidence.warning:
             logger.warning(f"[Confidence] {audit_report.confidence.warning}")
 
-        final_answer = self._compose_final_section(section, final_answer, observation_log, audit_report)
-        
-        self._log_analytical_audit_metrics(
-            section.title, section_index, audit_report, final_answer, tool_calls_count, sources_metadata
+        final_answer = self._finalize_section_with_governance(
+            section,
+            final_answer,
+            observation_log,
+            audit_report,
+            tool_calls_count,
+            sources_metadata,
+            evidence_scores_dict,
+            section_index,
         )
-        
-        # Record section content generation completion log
+
         if self.report_logger:
             self.report_logger.log_section_content(
                 section_title=section.title,
@@ -2682,7 +3911,7 @@ class ReportAgent:
                 content=final_answer,
                 tool_calls_count=tool_calls_count
             )
-        
+
         return final_answer
     
     def generate_report(
@@ -3801,6 +5030,12 @@ class ReportManager:
         """Delete report (entire folder)."""
         import shutil
         
+        # Clean up logging file handlers before deleting directory to avoid FileNotFoundError on write
+        try:
+            ReportConsoleLogger.cleanup_handlers(report_id)
+        except Exception as e:
+            logger.warning(f"Error cleaning up console log handlers for {report_id} during deletion: {e}")
+            
         folder_path = cls._get_report_folder(report_id)
         
         # New format: delete the entire folder

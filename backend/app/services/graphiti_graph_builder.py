@@ -63,13 +63,28 @@ class GraphitiGraphBuilderService(GraphBuilderService):
         async def _add_all_episodes() -> List[str]:
             from graphiti_core.nodes import EpisodeType
             from graphiti_core.utils.bulk_utils import RawEpisode
+            from ..utils.logger import get_logger
 
+            build_logger = get_logger("mirofish.build")
             reference_time = graphiti_client.utcnow()
             total_batches = (total_chunks + batch_size - 1) // batch_size
-            
-            semaphore = asyncio.Semaphore(Config.GRAPHITI_SEMAPHORE_LIMIT)
+            concurrency = Config.graphiti_effective_semaphore_limit()
+            build_logger.info(
+                "Graphiti bulk ingest: %d chunks in %d batches (concurrency=%d, provider=%s)",
+                total_chunks,
+                total_batches,
+                concurrency,
+                Config.LLM_PROVIDER,
+            )
+
+            semaphore = asyncio.Semaphore(concurrency)
             completed_batches = 0
+            active_batches = set()
             progress_lock = threading.Lock()
+
+            def update_progress(msg: str, ratio: float):
+                if progress_callback:
+                    progress_callback(msg, ratio)
 
             async def _process_batch(batch_index: int, batch_num: int) -> List[str]:
                 nonlocal completed_batches
@@ -96,32 +111,84 @@ class GraphitiGraphBuilderService(GraphBuilderService):
                         edge_type_map=ontology.get("edge_type_map"),
                     )
 
-                async with semaphore:
-                    result = await run_pipeline_step_async(
-                        f"graphiti_add_episode_bulk_{batch_num}",
-                        _add_batch,
+                build_logger.info(f"Batch {batch_num}/{total_batches} queuing... completed: {completed_batches}/{total_batches}.")
+                with progress_lock:
+                    active_batches.add(batch_num)
+                    ratio = completed_batches / total_batches
+                    update_progress(
+                        f"Queued batch {batch_num}/{total_batches} ({len(batch_chunks)} chunks). Completed: {completed_batches}/{total_batches}.",
+                        ratio,
                     )
-                    
-                    with progress_lock:
-                        completed_batches += 1
-                        if progress_callback:
+
+                heartbeat_stop = asyncio.Event()
+
+                async def _batch_heartbeat() -> None:
+                    elapsed = 0
+                    interval = max(15, Config.GRAPHITI_BATCH_HEARTBEAT_SECONDS)
+                    while not heartbeat_stop.is_set():
+                        await asyncio.sleep(interval)
+                        if heartbeat_stop.is_set():
+                            break
+                        elapsed += interval
+                        with progress_lock:
                             ratio = completed_batches / total_batches
-                            progress_callback(
+                            update_progress(
+                                f"Processing batch {batch_num}/{total_batches} "
+                                f"(LLM extraction running, ~{elapsed}s)... "
+                                f"Completed: {completed_batches}/{total_batches}.",
+                                ratio,
+                            )
+
+                try:
+                    async with semaphore:
+                        build_logger.info(f"Batch {batch_num}/{total_batches} acquired semaphore slot, starting ingest...")
+                        with progress_lock:
+                            ratio = completed_batches / total_batches
+                            update_progress(
+                                f"Processing batch {batch_num}/{total_batches} (acquired slot)... Completed: {completed_batches}/{total_batches}.",
+                                ratio,
+                            )
+
+                        heartbeat_task = asyncio.create_task(_batch_heartbeat())
+                        try:
+                            result = await run_pipeline_step_async(
+                                f"graphiti_add_episode_bulk_{batch_num}",
+                                _add_batch,
+                            )
+                        finally:
+                            heartbeat_stop.set()
+                            heartbeat_task.cancel()
+                            try:
+                                await heartbeat_task
+                            except asyncio.CancelledError:
+                                pass
+                        
+                        with progress_lock:
+                            completed_batches += 1
+                            active_batches.discard(batch_num)
+                            ratio = completed_batches / total_batches
+                            build_logger.info(f"Batch {batch_num}/{total_batches} completed successfully. Total completed: {completed_batches}/{total_batches}.")
+                            update_progress(
                                 t(
                                     "progress.sendingBatch",
                                     current=completed_batches,
                                     total=total_batches,
                                     chunks=len(batch_chunks),
-                                ),
+                                ) + f" (Active: {len(active_batches)} batches)",
                                 ratio,
                             )
                             
-                    uuids = []
-                    for episode in getattr(result, "episodes", []) or []:
-                        episode_uuid = getattr(episode, "uuid", None)
-                        if episode_uuid:
-                            uuids.append(str(episode_uuid))
-                    return uuids
+                        uuids = []
+                        for episode in getattr(result, "episodes", []) or []:
+                            episode_uuid = getattr(episode, "uuid", None)
+                            if episode_uuid:
+                                uuids.append(str(episode_uuid))
+                        return uuids
+                except Exception as e:
+                    build_logger.error(f"Batch {batch_num}/{total_batches} failed: {e}")
+                    with progress_lock:
+                        active_batches.discard(batch_num)
+                    raise
 
             tasks = []
             for batch_index in range(0, total_chunks, batch_size):

@@ -500,6 +500,10 @@ const graphSvg = ref(null)
 let pollTimer = null
 let ontologyPollTimer = null
 let lastOntologyLogMessage = ''
+let buildStaleNotified = false
+
+const STALE_BUILD_ERROR =
+  'Build task is no longer on the server (often after a restart). Click Retry build to continue.'
 
 const applyBuildProgress = (progress, message) => {
   const prev = buildProgress.value?.progress ?? 0
@@ -510,18 +514,26 @@ const applyBuildProgress = (progress, message) => {
   }
 }
 
+const handleStaleBuildTask = () => {
+  stopPolling()
+  buildError.value = STALE_BUILD_ERROR
+  if (!buildStaleNotified) {
+    buildStaleNotified = true
+    console.warn('[build]', STALE_BUILD_ERROR)
+  }
+}
+
 const refreshBuildProgressFromProject = async () => {
   try {
     const response = await getProject(currentProjectId.value)
     if (!response.success) return
     const p = response.data
+    if (p.graph_build_task_stale) {
+      handleStaleBuildTask()
+      return
+    }
     if (p.status === 'graph_building' && (p.graph_build_progress || p.graph_build_message)) {
       applyBuildProgress(p.graph_build_progress, p.graph_build_message)
-    }
-    if (p.graph_build_task_stale) {
-      console.warn(
-        '[build] Task missing on server (often after restart). Retry build to continue.',
-      )
     }
   } catch (err) {
     console.warn('refreshBuildProgressFromProject:', err)
@@ -607,7 +619,11 @@ const retryBuildGraph = async () => {
   buildError.value = ''
   error.value = ''
   buildProgress.value = null
-  await startBuildGraph()
+  buildStaleNotified = false
+  if (projectData.value) {
+    projectData.value = { ...projectData.value, graph_id: null }
+  }
+  await startBuildGraph(true)
 }
 
 const toggleFullScreen = () => {
@@ -767,11 +783,15 @@ const loadProject = async () => {
       if (response.data.status === 'graph_building' && response.data.graph_build_task_id) {
         currentPhase.value = 1
         applyBuildProgress(response.data.graph_build_progress, response.data.graph_build_message)
-        if (response.data.graph_id) {
-          await loadGraph(response.data.graph_id)
+        if (response.data.graph_build_task_stale) {
+          handleStaleBuildTask()
+        } else {
+          if (response.data.graph_id) {
+            await loadGraph(response.data.graph_id)
+          }
+          startGraphPolling()
+          startPollingTask(response.data.graph_build_task_id)
         }
-        startGraphPolling()
-        startPollingTask(response.data.graph_build_task_id)
       }
       
       // hydrate finished graph
@@ -856,12 +876,14 @@ const pollOntologyTask = async (taskId) => {
 }
 
 // start graph worker
-const startBuildGraph = async () => {
+const startBuildGraph = async (force = false) => {
   try {
     currentPhase.value = 1
+    buildError.value = ''
+    buildStaleNotified = false
     applyBuildProgress(0, 'Starting graph build...')
     
-    const response = await buildGraph({ project_id: currentProjectId.value })
+    const response = await buildGraph({ project_id: currentProjectId.value, force })
     
     if (response.success) {
       applyBuildProgress(buildProgress.value?.progress ?? 0, 'Graph build job started.')
@@ -875,12 +897,16 @@ const startBuildGraph = async () => {
       // poll task row
       startPollingTask(taskId)
     } else {
-      error.value = response.error || 'Could not start graph build'
+      const errMsg = response.error || 'Could not start graph build'
+      error.value = errMsg
+      buildError.value = errMsg
       buildProgress.value = null
     }
   } catch (err) {
     console.error('Build graph error:', err)
-    error.value = 'Could not start graph build: ' + (err.message || 'Unknown error')
+    const errMsg = 'Could not start graph build: ' + (err.message || 'Unknown error')
+    error.value = errMsg
+    buildError.value = errMsg
     buildProgress.value = null
   }
 }

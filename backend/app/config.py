@@ -132,6 +132,8 @@ class Config:
     GRAPHITI_EMBEDDER = (os.environ.get('GRAPHITI_EMBEDDER') or 'auto').strip().lower()
     GRAPHITI_RERANKER = (os.environ.get('GRAPHITI_RERANKER') or 'auto').strip().lower()
     GRAPHITI_SEMAPHORE_LIMIT = int(os.environ.get('GRAPHITI_SEMAPHORE_LIMIT', '10'))
+    # Cap parallel Graphiti bulk batches when LLM_PROVIDER=ollama (local models serialize requests).
+    GRAPHITI_OLLAMA_CONCURRENCY = int(os.environ.get('GRAPHITI_OLLAMA_CONCURRENCY', '1'))
     GRAPHITI_SEARCH_TIMEOUT = int(os.environ.get('GRAPHITI_SEARCH_TIMEOUT', '30'))
     # Expected seconds per Graphiti bulk batch; used for in-batch progress heartbeat only.
     GRAPHITI_BATCH_HEARTBEAT_SECONDS = int(os.environ.get('GRAPHITI_BATCH_HEARTBEAT_SECONDS', '90'))
@@ -146,6 +148,14 @@ class Config:
 
     # Legacy Zep settings
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
+
+    @classmethod
+    def graphiti_effective_semaphore_limit(cls) -> int:
+        """Parallel Graphiti bulk batches; lower for local Ollama to avoid LLM queue stalls."""
+        limit = max(1, cls.GRAPHITI_SEMAPHORE_LIMIT)
+        if cls.LLM_PROVIDER == "ollama":
+            return max(1, min(limit, cls.GRAPHITI_OLLAMA_CONCURRENCY))
+        return limit
     
     # File upload settings
     MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50MB

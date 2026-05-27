@@ -12,8 +12,8 @@ MiroFish is a multi-agent prediction and simulation engine that bridges static k
 | **Step 1 — Graph build** | No | Graphiti entity/relation extraction per episode chunk | Local embeddings (`BAAI/bge-large-en-v1.5`) |
 | **Step 2 — Profiles & config** | No | Personas, time flow, events, per-agent activity JSON | Graph semantic search for sparse entities only |
 | **Step 3 — Simulation** | No | Every agent action via OASIS `LLMAction` | Optional boost LLM (`LLM_BOOST_*`) for second platform |
-| **Step 4 — Report** | No | Outline, ReACT sections, post-report chat | Graph tools; `interview_agents` hits live OASIS |
-| **Step 5 — Deep interaction** | No | Interview planning, surveys, chat (where applicable) | OASIS subprocess LLM for agent replies |
+| **Step 4 — Report** | No | Outline, ReACT section drafts, multi-lens analysis, and Composer-driven rewrite | Graph tools; `interview_agents` hits live OASIS; 12-checker Analytical Audit & Epistemic review |
+| **Step 5 — Deep interaction** | No | Interview planning, surveys, report chat (multi-lens) | OASIS subprocess LLM for agent replies; Graph tools |
 
 **Web search is only used in Step 1 (ontology seeding), and only when the user enables “Augment seed context with Gemini web search” on Home.** All other steps rely on uploaded documents, the knowledge graph, and simulation logs—not live Google Search.
 
@@ -49,6 +49,7 @@ flowchart LR
     subgraph s4 [Step 4: Report]
         PL[LLM: report outline]
         RC[LLM ReACT + graph tools]
+        AUD[LLM Audit Checkers & Epistemic Gate]
     end
 
     subgraph s5 [Step 5: Deep interaction]
@@ -69,7 +70,9 @@ flowchart LR
     MEM --> RC
     OAS --> IV
     GB --> RC
-    RC --> IV
+    RC --> AUD
+    AUD -->|Pass| IV
+    AUD -->|Fail: Severity rewrite| RC
 ```
 
 ---
@@ -113,7 +116,12 @@ sequenceDiagram
 
 **Key endpoints:** `POST /api/graph/ontology/generate`, `POST /api/graph/build`
 
-**Mechanics (unchanged highlights):** PascalCase relation normalization; parallel Graphiti ingestion (`GRAPHITI_SEMAPHORE_LIMIT`); checkpoint resume (`ontology_generated`, `graph_completed`); `GRAPHITI_BATCH_SIZE` batching with local `BAAI/bge-large-en-v1.5` embeddings.
+**Mechanics & Ingestion Enhancements:**
+- **Checkpoint Override:** Both ontology generation and graph build endpoints accept a `force` parameter (triggered in the UI via the "Regenerate Ontology" and "Rebuild Graph" actions). This ignores previously generated checkpoints (`ontology_generated`, `graph_completed`) to allow a fresh end-to-end rebuild.
+- **Graphiti Client Alignment:** Aligns Graphiti's edge de-duplication and background small tasks to use the primary configured LLM model (such as `gpt-4o-mini`, `gemini-3.5-flash`), preventing separate provider setup.
+- **Ollama Isolation:** When `LLM_PROVIDER` is set to `ollama`, the system isolates Ollama-specific environment variables (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, `MODEL_NAME`) to prevent local or cloud variable leakage.
+- **Vector Dimension Cleanup:** Includes the `backend/scripts/cleanup_neo4j_embedding_dimensions.py` script. This scans node embedding properties ending in `_embedding`, detects outlier dimensions, and purges mismatched properties to prevent similarity matching errors during GraphRAG queries.
+- **Other highlights:** PascalCase relation normalization; parallel Graphiti ingestion (`GRAPHITI_SEMAPHORE_LIMIT`); check-pointed resume; `GRAPHITI_BATCH_SIZE` batching with local `BAAI/bge-large-en-v1.5` embeddings.
 
 ---
 
@@ -198,6 +206,59 @@ stateDiagram-v2
 Streaming: thoughts and tool I/O → `agent_log.jsonl` (live UI timeline).
 
 **Key endpoints:** `POST /api/report/generate`, `GET /api/report/status`
+
+### Analytical Scaffold and Epistemic Control Layer
+
+MiroFish integrates an advanced hierarchical quality-gating, epistemic discrimination, and automated post-generation audit system to ensure rigorous, defensible, and analytical prediction reasoning instead of retail SEO storytelling.
+
+#### 1. Evidence Scoring & Epistemic Hierarchy
+
+Before synthesis, every retrieved evidence chunk is classified and evaluated by the system using two key services:
+* **`EpistemicDiscriminator`**: Categorizes each source into one of seven trust tiers. These tiers determine a hard **credibility cap** and **maximum thesis share** that the source can anchor:
+  * `SIMULATION_PRIMARY` (interview_agents / live simulation ground truth — Cap: `1.0`, Max Share: `45%`, Ceiling: `HIGH`)
+  * `INSTITUTIONAL` (SEC filings, regulatory filings, tier-1 financial wire services — Cap: `0.92`, Max Share: `40%`, Ceiling: `HIGH`)
+  * `PROFESSIONAL` (Graph retrieval, established business press — Cap: `0.78`, Max Share: `35%`, Ceiling: `MEDIUM`)
+  * `ANALYST_ACTION` (Analyst rating or price target changes — Cap: `0.52`, Max Share: `20%`, Ceiling: `LOW`)
+  * `RETAIL_COMMENTARY` (Retail investor media, generic finance blogs — Cap: `0.32`, Max Share: `12%`, Ceiling: `TENTATIVE_ONLY`)
+  * `SOCIAL_OPINION` (LinkedIn, social media posts, comments, forums — Cap: `0.18`, Max Share: `8%`, Ceiling: `TENTATIVE_ONLY`)
+  * `SPECULATIVE` (Rumors, unconfirmed reports — Cap: `0.12`, Max Share: `8%`, Ceiling: `TENTATIVE_ONLY`)
+* **`EvidenceEvaluator`**: Scores retrieved evidence chunks dynamically on:
+  * *Credibility* (tool-based baseline, capped by epistemic tier)
+  * *Relevance* (semantic overlap with section title & simulation requirements)
+  * *Recency* (source freshness score)
+  * *Specificity* (key and quantified claims count)
+  * *Strategic Materiality* (presence of financial terms like margins, revenues, USD values)
+  * *Durability* (detects structural/long-term signals vs ephemeral breaking rumors)
+  These metrics combine into a unified `synthesis_weight`. Hard caps guarantee that search salience cannot override epistemic tiers. Weak sources (retail/social/speculative) are explicitly annotated: `(tentative sentiment / low epistemic weight)`.
+
+#### 2. Markdown Scaffolding Rules (Enforced on ReACT Writer)
+
+The system injects strict formatting and structuring constraints directly into the section writer's prompt:
+* **Risk-First Ordering**: Systemic vulnerabilities, downside scenarios, friction points, and potential failure modes must be analyzed *before* describing optimistic or smooth trajectories.
+* **Causal Chain Scaffold**: Every major finding or claim must follow a complete causal-chain:
+  `Event / Observation → Operational Impact → Financial/Economic Impact → Strategic Implications → Vulnerability/Risk Invalidation`
+  *(e.g., in markets: deal premium → funding mix → dilution/accretion → EPS/valuation multiple → synergy realization risk).*
+* **Probabilistic Scenario Mapping**: Sections must conclude with a clear scenario block covering **Base Scenario** (with rough probability band, e.g., 60-70%), **Bear Scenario** (downside trajectory, probability band, e.g., 20-30%), and **Bull Scenario** (upside trajectory, probability band, e.g., 10%), each specifying an exact falsifiable trigger condition (actions/metrics).
+* **Retrieval Contamination Guardrail / Thesis Balancing**: No single source may anchor more than ~40% of factual claims. Multi-lens synthesis must balance structural, cyclical, macro, fundamental, and episodic drivers.
+* **Quantitative and Valuation Grounding**: Findings must be grounded in precise figures, margins, percentages, or monetary valuation metrics instead of vague qualitative narratives.
+
+#### 3. Analytical Audit & Post-Generation Verification Checkers
+
+Once a section is drafted, the system executes **12 automated verification checkers** to audit the draft. Failures generate diagnostic logs and increment a cumulative severity score. If the cumulative score exceeds a threshold (default `3`), the system triggers a **Composer-driven confidence-governed rewrite** of the section.
+
+The 12 checkers include:
+1. **`GroundingVerifier`**: Flags unanchored factual claims that do not cite source numbers inline (e.g., missing `[S1]`).
+2. **`ContradictionDetector`**: Identifies internal contradictions within drafted text.
+3. **`NumericalSanityChecker`**: Scans for anomalous figures or conflicting quantitative units.
+4. **`SpecificityDetector`**: Identifies vague filler sentences that should be removed or specified.
+5. **`ConfidenceCoverageChecker`**: Verifies speculative statements carry appropriate calibration labels, and flags overconfident unbacked claims.
+6. **`SkepticismChecker`**: Captures overstated certainty or confidence-credibility mismatches (e.g., citing a low-credibility retail source as definitive fact).
+7. **`EvidenceAlignmentChecker`**: Directly cross-checks claimed numbers and percentages in the draft against raw source data to prevent LLM hallucinations.
+8. **`AnchoringDistributionChecker`**: Flags single-source concentration risk (claims overly anchored on a single retrieved context, exceeding ~40%).
+9. **`CausalCompletenessChecker`**: Pinpoints gaps in the required causal-chain scaffold (missing operational, financial, or strategic links).
+10. **`NumericalGroundingCoverageChecker`**: Flags financial terminology (revenue, valuation, margin) that lacks corresponding numbers or quantities.
+11. **`ThesisBalanceChecker`**: Warns if the narrative is overfitted to a single salient retrieved theme instead of balancing multiple driver lenses.
+12. ****`EpistemicReviewChecker`**: Checks for weak epistemic source citations (evidence quality collapse) and overconfident claims built on weak epistemic tiers.
 
 ---
 

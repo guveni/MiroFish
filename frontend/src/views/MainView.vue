@@ -123,6 +123,7 @@ const ontologyProgress = ref(null)
 const buildProgress = ref(null)
 const systemLogs = ref([])
 const stepErrors = ref({ ontology: '', build: '' })
+const forceNextBuild = ref(false)
 
 // Polling timers
 let pollTimer = null
@@ -130,6 +131,10 @@ let graphPollTimer = null
 let ontologyPollTimer = null
 let lastOntologyLogMessage = ''
 let lastBuildLogMessage = ''
+let buildStaleNotified = false
+
+const STALE_BUILD_ERROR =
+  'Build task is no longer on the server (often after a restart). Click Rebuild Graph to continue.'
 
 const applyBuildProgress = (progress, message) => {
   const prev = buildProgress.value?.progress ?? 0
@@ -140,20 +145,27 @@ const applyBuildProgress = (progress, message) => {
   }
 }
 
+const handleStaleBuildTask = () => {
+  stopPolling()
+  stepErrors.value.build = STALE_BUILD_ERROR
+  if (!buildStaleNotified) {
+    buildStaleNotified = true
+    addLog(STALE_BUILD_ERROR, 'error')
+  }
+}
+
 const refreshBuildProgressFromProject = async () => {
   if (!currentProjectId.value || currentProjectId.value === 'new') return
   try {
     const res = await getProject(currentProjectId.value)
     if (!res.success) return
     const p = res.data
+    if (p.graph_build_task_stale) {
+      handleStaleBuildTask()
+      return
+    }
     if (p.status === 'graph_building' && (p.graph_build_progress || p.graph_build_message)) {
       applyBuildProgress(p.graph_build_progress, p.graph_build_message)
-    }
-    if (p.graph_build_task_stale) {
-      addLog(
-        'Build task is no longer on the server (often after a restart). Use Retry build to continue.',
-        'error',
-      )
     }
   } catch (e) {
     console.warn('refreshBuildProgressFromProject:', e)
@@ -234,10 +246,12 @@ const retryOntology = async () => {
   ontologyProgress.value = { message: 'Retrying ontology generation...', progress: 0 }
   addLog('Retrying ontology generation...')
   lastOntologyLogMessage = ''
+  forceNextBuild.value = true
 
   const formData = new FormData()
   formData.append('simulation_requirement', projectData.value?.simulation_requirement || '')
   formData.append('project_id', currentProjectId.value)
+  formData.append('force', 'true')
 
   try {
     const res = await generateOntology(formData)
@@ -248,7 +262,8 @@ const retryOntology = async () => {
       projectData.value = res.data
       ontologyProgress.value = null
       addLog('Ontology retry completed.')
-      await startBuildGraph()
+      await startBuildGraph(true)
+      forceNextBuild.value = false
     } else {
       const errMsg = res.error || 'Ontology retry failed'
       stepErrors.value.ontology = errMsg
@@ -271,7 +286,11 @@ const retryBuildGraph = async () => {
   stepErrors.value.build = ''
   error.value = ''
   buildProgress.value = null
-  await startBuildGraph()
+  buildStaleNotified = false
+  if (projectData.value) {
+    projectData.value = { ...projectData.value, graph_id: null }
+  }
+  await startBuildGraph(true)
 }
 
 // --- Data Logic ---
@@ -356,11 +375,15 @@ const loadProject = async () => {
       } else if (res.data.status === 'graph_building' && res.data.graph_build_task_id) {
         currentPhase.value = 1
         applyBuildProgress(res.data.graph_build_progress, res.data.graph_build_message)
-        if (res.data.graph_id) {
-          await loadGraph(res.data.graph_id)
+        if (res.data.graph_build_task_stale) {
+          handleStaleBuildTask()
+        } else {
+          if (res.data.graph_id) {
+            await loadGraph(res.data.graph_id)
+          }
+          startPollingTask(res.data.graph_build_task_id)
+          startGraphPolling()
         }
-        startPollingTask(res.data.graph_build_task_id)
-        startGraphPolling()
       } else if (res.data.status === 'graph_completed' && res.data.graph_id) {
         currentPhase.value = 2
         await loadGraph(res.data.graph_id)
@@ -387,24 +410,31 @@ const updatePhaseByStatus = (status) => {
   }
 }
 
-const startBuildGraph = async () => {
+const startBuildGraph = async (force = false) => {
   try {
     currentPhase.value = 1
+    stepErrors.value.build = ''
+    buildStaleNotified = false
     applyBuildProgress(0, 'Starting build...')
     addLog('Initiating graph build...')
     
-    const res = await buildGraph({ project_id: currentProjectId.value })
+    const res = await buildGraph({ project_id: currentProjectId.value, force })
     if (res.success) {
       addLog(`Graph build task started. Task ID: ${res.data.task_id}`)
+      if (projectData.value) {
+        projectData.value = { ...projectData.value, graph_id: res.data.graph_id ?? null }
+      }
       startGraphPolling()
       startPollingTask(res.data.task_id)
     } else {
       error.value = res.error
-      addLog(`Error starting build: ${res.error}`)
+      stepErrors.value.build = res.error
+      addLog(`Error starting build: ${res.error}`, 'error')
     }
   } catch (err) {
     error.value = err.message
-    addLog(`Exception in startBuildGraph: ${err.message}`)
+    stepErrors.value.build = err.message
+    addLog(`Exception in startBuildGraph: ${err.message}`, 'error')
   }
 }
 
@@ -462,7 +492,8 @@ const pollOntologyTask = async (taskId) => {
         `Ontology complete: ${task.result.ontology?.entity_types?.length ?? 0} entity types`,
         'info',
       )
-      await startBuildGraph()
+      await startBuildGraph(forceNextBuild.value)
+      forceNextBuild.value = false
     } else if (task.status === 'failed') {
       stopOntologyPolling()
       ontologyProgress.value = null

@@ -7,7 +7,11 @@ from app.services.report_agent import (
     ConfidenceCoverageChecker,
     AnalyticalReport,
     GroundingReport,
-    ReportAgent
+    ReportAgent,
+    EvidenceAlignmentChecker,
+    AnchoringDistributionChecker,
+    CausalCompletenessChecker,
+    NumericalGroundingCoverageChecker
 )
 from app.services.analytical_modules.markets import MarketsAnalyticalModule
 from app.services.analytical_modules.policy import PolicyAnalyticalModule
@@ -164,3 +168,491 @@ def test_report_agent_module_selection():
     agent_f = ReportAgent("dummy_graph", "dummy_sim", "Some general topic")
     module_f = agent_f._select_analytical_module("General discussion")
     assert isinstance(module_f, BaseAnalyticalModule)
+
+
+def test_evidence_evaluator_and_digest():
+    from app.services.evidence_evaluator import EvidenceEvaluator, EvidenceScore
+    evaluator = EvidenceEvaluator()
+
+    # 1. Score evidence
+    score = evaluator.score_evidence(
+        source_num=1,
+        raw_result="The quarterly revenue plunged 15% due to regulatory compliance cost of $5 million USD.",
+        tool_name="insight_forge",
+        section_title="Financial and market impact",
+        simulation_requirement="Simulate formaldehyde compliance cost impact on market valuation"
+    )
+    assert score.source_num == 1
+    assert score.tool_name == "insight_forge"
+    assert score.credibility >= 0.9
+    assert score.epistemic_tier == "SIMULATION_PRIMARY"
+    assert score.strategic_materiality > 0.5  # contains revenue, cost, compliance cost, $5 million USD
+    assert score.quantified_claims_count >= 1
+
+    # 2. Build evidence card
+    card = evaluator.build_evidence_card(score, "Raw Result Content")
+    assert "[Evidence Card — insight_forge — S1]" in card
+    assert "Weight:" in card
+    assert "Raw Result Content" in card
+
+    # 3. Detect concentration (needs >=3 sources)
+    score1 = score
+    score2 = evaluator.score_evidence(
+        source_num=2,
+        raw_result="A brief statement with low specificity and no metrics.",
+        tool_name="web_search",
+        section_title="Financial and market impact",
+        simulation_requirement="Simulate formaldehyde compliance cost impact on market valuation",
+        freshness_score=0.3
+    )
+    score3 = evaluator.score_evidence(
+        source_num=3,
+        raw_result="Another short phrase.",
+        tool_name="quick_search",
+        section_title="Financial and market impact",
+        simulation_requirement="Simulate formaldehyde compliance cost impact on market valuation",
+        freshness_score=0.4
+    )
+    # Since score1 is insight_forge and highly strategic/material, its weight will be much higher than score2 and score3 (both low/medium)
+    all_scores = [score1, score2, score3]
+    warning = evaluator.detect_concentration(all_scores)
+    assert warning is not None
+    assert "[Evidence Concentration Warning]" in warning
+
+    # 4. Build digest
+    digest = evaluator.build_digest(all_scores)
+    assert "EPISTEMIC HIERARCHY" in digest
+    assert "[S1]" in digest and "insight_forge" in digest
+
+
+def test_skepticism_checker():
+    from app.services.report_agent import SkepticismChecker
+    from app.services.evidence_evaluator import EvidenceScore
+    checker = SkepticismChecker()
+
+    # Fake scored sources map
+    evidence_scores = {
+        1: EvidenceScore(
+            source_num=1, tool_name="web_search", credibility=0.4, relevance=0.8, recency=0.9, 
+            specificity=0.3, strategic_materiality=0.2, synthesis_weight=0.35,
+            key_claims_count=0, quantified_claims_count=0, speculative_claims_count=0
+        )
+    }
+
+    # Draft with overstated certainty, evidence mismatch (citing low-credibility S1 as definitive fact), and missing alternatives
+    draft = "We will definitely dominate the market [S1]. The pricing is always perfect and will surely rise [S1]."
+    report = checker.check(draft, evidence_scores)
+    
+    assert report.overstated_certainty is True
+    assert len(report.mismatches) >= 1
+    assert "uses definitive language" in report.mismatches[0]
+    assert report.missing_alternatives is True
+    assert report.warning is not None
+    assert "SKEPTICISM WARNING" in report.warning
+
+
+def test_markets_quantitative_grounding():
+    module = MarketsAnalyticalModule()
+    
+    # Financial terms mentioned but absolutely no quantitative figures
+    anoms = module.check_quantitative_grounding("Our revenue, valuation, and profits have changed.", [])
+    assert len(anoms) >= 1
+    assert "revenue, valuation, or earnings" in anoms[0]
+
+    # Grounding is present, should pass
+    anoms_ok = module.check_quantitative_grounding("Our revenue increased to $15 million USD, representing a 20% margin.", [])
+    assert len(anoms_ok) == 0
+
+
+def test_evidence_alignment_checker_numeric_mismatch():
+    from app.services.evidence_evaluator import EvidenceScore
+
+    checker = EvidenceAlignmentChecker()
+
+    sources_metadata = [
+        (1, "web_search", "The quarterly revenue rose 5% to $10 million in 2024."),
+    ]
+    evidence_scores = {
+        1: EvidenceScore(
+            source_num=1,
+            tool_name="web_search",
+            credibility=0.4,
+            relevance=0.8,
+            recency=0.9,
+            specificity=0.3,
+            strategic_materiality=0.2,
+            synthesis_weight=0.35,
+            key_claims_count=1,
+            quantified_claims_count=1,
+            speculative_claims_count=0,
+        )
+    }
+
+    # Numeric claim intentionally mismatches both % and $ amount.
+    draft = "The quarterly revenue rose 15% to $12 million in 2024 [S1]."
+    report = checker.check(draft, sources_metadata, evidence_scores)
+
+    assert report.warning is not None
+    assert len(report.unsupported_sentences) >= 1
+
+
+def test_evidence_alignment_checker_numeric_match():
+    from app.services.evidence_evaluator import EvidenceScore
+
+    checker = EvidenceAlignmentChecker()
+
+    sources_metadata = [
+        (1, "web_search", "The quarterly revenue rose 5% to $10 million in 2024."),
+    ]
+    evidence_scores = {
+        1: EvidenceScore(
+            source_num=1,
+            tool_name="web_search",
+            credibility=0.9,
+            relevance=0.8,
+            recency=0.9,
+            specificity=0.8,
+            strategic_materiality=0.6,
+            synthesis_weight=0.8,
+            key_claims_count=1,
+            quantified_claims_count=1,
+            speculative_claims_count=0,
+        )
+    }
+
+    draft = "The quarterly revenue rose 5% to $10 million in 2024 [S1]."
+    report = checker.check(draft, sources_metadata, evidence_scores)
+
+    assert report.warning is None
+    assert len(report.unsupported_sentences) == 0
+
+
+def test_anchoring_distribution_checker_flags_single_source_dominance():
+    from app.services.evidence_evaluator import EvidenceScore
+
+    checker = AnchoringDistributionChecker()
+
+    evidence_scores = {
+        1: EvidenceScore(
+            source_num=1,
+            tool_name="web_search",
+            credibility=0.4,
+            relevance=0.8,
+            recency=0.9,
+            specificity=0.3,
+            strategic_materiality=0.2,
+            synthesis_weight=0.35,
+            key_claims_count=1,
+            quantified_claims_count=0,
+            speculative_claims_count=0,
+        ),
+        2: EvidenceScore(
+            source_num=2,
+            tool_name="quick_search",
+            credibility=0.7,
+            relevance=0.8,
+            recency=0.9,
+            specificity=0.6,
+            strategic_materiality=0.3,
+            synthesis_weight=0.5,
+            key_claims_count=1,
+            quantified_claims_count=0,
+            speculative_claims_count=0,
+        ),
+        3: EvidenceScore(
+            source_num=3,
+            tool_name="panorama_search",
+            credibility=0.6,
+            relevance=0.8,
+            recency=0.9,
+            specificity=0.6,
+            strategic_materiality=0.3,
+            synthesis_weight=0.55,
+            key_claims_count=1,
+            quantified_claims_count=0,
+            speculative_claims_count=0,
+        ),
+    }
+
+    draft = (
+        "Event A will drive outcomes [S1]. "
+        "Event A changes costs [S1]. "
+        "Event A affects pricing [S1]. "
+        "Event A impacts demand [S1]. "
+        "Event A shifts valuation [S1]. "
+        "Supporting detail from S2 [S2]. "
+        "Supporting detail from S3 [S3]."
+    )
+
+    report = checker.check(draft, evidence_scores)
+    assert report.warning is not None
+    assert "NARRATIVE ANCHORING RISK" in report.warning
+    assert "[S1]" in report.warning
+
+
+def test_causal_completeness_checker_flags_missing_mechanism():
+    checker = CausalCompletenessChecker()
+
+    draft = "Revenue will increase and valuation will rise [S1]."
+    report = checker.check(draft, "Market valuation impact", "Market reactions to policy")
+
+    assert report.warning is not None
+    assert "mechanism" in report.warning.lower()
+
+
+def test_numerical_grounding_coverage_checker_flags_missing_probability_weighting():
+    checker = NumericalGroundingCoverageChecker()
+
+    draft = "Valuation increases from 10x to 12x based on market signals [S1]."
+    report = checker.check(draft, "Market valuation impact", "Market reactions to policy")
+
+    assert report.warning is not None
+    assert "probability-weighted" in report.warning.lower()
+
+
+def test_epistemic_discriminator_classifies_social_and_institutional():
+    from app.services.epistemic_discriminator import EpistemicDiscriminator
+
+    disc = EpistemicDiscriminator()
+
+    social = disc.classify(
+        "A LinkedIn comment argued the merger will definitely succeed according to users.",
+        "web_search",
+    )
+    assert social.tier in ("SOCIAL_OPINION", "SPECULATIVE", "RETAIL_COMMENTARY")
+    assert social.confidence_ceiling == "TENTATIVE_ONLY"
+
+    institutional = disc.classify(
+        "SEC filing 10-K shows revenue of $5B https://www.sec.gov/archives/...",
+        "web_search",
+    )
+    assert institutional.tier == "INSTITUTIONAL"
+    assert institutional.is_primary_eligible
+
+
+def test_evidence_evaluator_applies_epistemic_cap():
+    from app.services.evidence_evaluator import EvidenceEvaluator
+
+    evaluator = EvidenceEvaluator()
+    score = evaluator.score_evidence(
+        source_num=1,
+        raw_result="Reddit and LinkedIn comments say the stock will moon.",
+        tool_name="web_search",
+        section_title="Market view",
+        simulation_requirement="Valuation impact",
+    )
+    assert score.epistemic_tier in ("SOCIAL_OPINION", "RETAIL_COMMENTARY", "SPECULATIVE")
+    assert score.synthesis_weight <= 0.35
+    assert score.is_tentative_only
+
+
+def test_epistemic_review_checker_flags_collapse():
+    from app.services.report_agent import EpistemicReviewChecker
+    from app.services.evidence_evaluator import EvidenceScore
+
+    checker = EpistemicReviewChecker()
+    evidence_scores = {
+        1: EvidenceScore(
+            source_num=1, tool_name="web_search", credibility=0.2, relevance=0.9,
+            recency=0.9, specificity=0.3, strategic_materiality=0.1, synthesis_weight=0.2,
+            key_claims_count=1, quantified_claims_count=0, speculative_claims_count=1,
+            epistemic_tier="SOCIAL_OPINION", confidence_ceiling="TENTATIVE_ONLY",
+            epistemic_label="Social / comment opinion",
+        ),
+        2: EvidenceScore(
+            source_num=2, tool_name="web_search", credibility=0.25, relevance=0.8,
+            recency=0.9, specificity=0.3, strategic_materiality=0.1, synthesis_weight=0.22,
+            key_claims_count=1, quantified_claims_count=0, speculative_claims_count=0,
+            epistemic_tier="RETAIL_COMMENTARY", confidence_ceiling="TENTATIVE_ONLY",
+            epistemic_label="Retail financial commentary",
+        ),
+    }
+    draft = (
+        "The market will definitely rally [S1]. Analysts upgraded the name [S1]. "
+        "LinkedIn sentiment proves bullishness [S2]. Retail blogs confirm upside [S2]."
+    )
+    report = checker.check(draft, evidence_scores)
+    assert report.warning is not None
+    assert "EPISTEMIC" in report.warning
+
+
+def test_section_confidence_profile_downgrades_tentative_heavy_evidence():
+    from app.services.evidence_evaluator import EvidenceEvaluator, EvidenceScore
+
+    evaluator = EvidenceEvaluator()
+    scores = [
+        EvidenceScore(
+            source_num=1, tool_name="web_search", credibility=0.2, relevance=0.9,
+            recency=0.9, specificity=0.3, strategic_materiality=0.1, synthesis_weight=0.25,
+            key_claims_count=1, quantified_claims_count=0, speculative_claims_count=1,
+            epistemic_tier="SOCIAL_OPINION", confidence_ceiling="TENTATIVE_ONLY",
+            epistemic_label="Social",
+        ),
+        EvidenceScore(
+            source_num=2, tool_name="web_search", credibility=0.25, relevance=0.8,
+            recency=0.9, specificity=0.3, strategic_materiality=0.1, synthesis_weight=0.22,
+            key_claims_count=1, quantified_claims_count=0, speculative_claims_count=0,
+            epistemic_tier="RETAIL_COMMENTARY", confidence_ceiling="TENTATIVE_ONLY",
+            epistemic_label="Retail",
+        ),
+    ]
+    profile = evaluator.compute_section_profile(scores)
+    assert profile.section_ceiling == "TENTATIVE_ONLY"
+    assert profile.assertion_strength == "exploratory"
+    block = evaluator.build_confidence_governed_block(profile)
+    assert "Banned phrasing" in block
+    allocation = evaluator.build_narrative_weight_allocation(scores)
+    assert "context-only" in allocation
+
+
+def test_analytical_report_requires_confidence_rewrite_on_severity():
+    from app.services.report_agent import (
+        AnalyticalReport,
+        GroundingReport,
+        CredibilityReport,
+        ContradictionReport,
+        NumericalSanityReport,
+        SpecificityReport,
+        ConfidenceReport,
+        EvidenceAlignmentReport,
+        AnchoringDistributionReport,
+        CausalCompletenessReport,
+        NumericalGroundingCoverageReport,
+        SkepticismReport,
+        EpistemicReviewReport,
+    )
+
+    def _empty_report(**kwargs):
+        defaults = dict(
+            grounding=GroundingReport(
+                total_sources=1,
+                cited_sources=[1],
+                uncited_sources=[],
+                grounding_score=1.0,
+                high_risk_sentences=[],
+                warning=None,
+                summary="ok",
+            ),
+            credibility=CredibilityReport(
+                source_weights={1: "HIGH"},
+                cross_referenced_claims=[],
+                summary="ok",
+            ),
+            contradictions=ContradictionReport(
+                contradictions=[], warning=None, summary="ok"
+            ),
+            numerical_sanity=NumericalSanityReport(
+                anomalies=[], warning=None, summary="ok"
+            ),
+            specificity=SpecificityReport(
+                vague_sentences=[], warning=None, summary="ok"
+            ),
+            confidence=ConfidenceReport(
+                uncalibrated_speculations=[],
+                overconfident_unbacked_claims=[],
+                warning=None,
+                summary="ok",
+            ),
+            evidence_alignment=EvidenceAlignmentReport(
+                unsupported_sentences=[],
+                alignment_score=1.0,
+                warning=None,
+                summary="ok",
+            ),
+            anchoring=AnchoringDistributionReport(warning=None, summary="ok"),
+            causal_completeness=CausalCompletenessReport(
+                missing_components=[], warning=None, summary="ok"
+            ),
+            numerical_grounding_coverage=NumericalGroundingCoverageReport(
+                missing_components=[], warning=None, summary="ok"
+            ),
+        )
+        defaults.update(kwargs)
+        return AnalyticalReport(**defaults)
+
+    mild = _empty_report()
+    assert not mild.requires_confidence_rewrite()
+
+    severe = _empty_report(
+        confidence=ConfidenceReport(
+            uncalibrated_speculations=["a", "b"],
+            overconfident_unbacked_claims=["c"],
+            summary="bad",
+            warning="⚠️ confidence",
+        ),
+        skepticism=SkepticismReport(
+            overstated_certainty=True,
+            mismatches=["m1"],
+            missing_alternatives=True,
+            summary="bad",
+            warning="⚠️ skepticism",
+        ),
+        epistemic_review=EpistemicReviewReport(
+            evidence_quality_collapse=True,
+            overconfident_low_tier_sentences=["x"],
+            missing_primary_anchor=True,
+            low_tier_citation_share=0.6,
+            critique_questions=[],
+            summary="bad",
+            warning="⚠️ EPISTEMIC",
+        ),
+    )
+    assert severe.requires_confidence_rewrite()
+    assert severe.severity_score() >= 3
+
+
+def test_evidence_evaluator_durability_and_synthesis_mandate():
+    from app.services.evidence_evaluator import EvidenceEvaluator
+
+    evaluator = EvidenceEvaluator()
+
+    durable = evaluator.score_evidence(
+        source_num=1,
+        raw_result="Structural competitive moat and long-term unit economics drive revenue and margin.",
+        tool_name="insight_forge",
+        section_title="Market structure",
+        simulation_requirement="Market valuation under regulatory change",
+    )
+    ephemeral = evaluator.score_evidence(
+        source_num=2,
+        raw_result="Breaking: merger talks reportedly spike today according to sources.",
+        tool_name="web_search",
+        section_title="Market structure",
+        simulation_requirement="Market valuation under regulatory change",
+        freshness_score=0.95,
+    )
+
+    assert durable.durability > ephemeral.durability
+    mandate = evaluator.build_synthesis_mandate([durable, ephemeral], section_title="Test")
+    assert "PRE-SYNTHESIS EPISTEMIC MANDATE" in mandate
+
+
+def test_thesis_balance_checker_flags_single_theme():
+    from app.services.report_agent import ThesisBalanceChecker
+
+    checker = ThesisBalanceChecker()
+    draft = (
+        "The merger announcement dominates outlook. The deal headline drives all narrative. "
+        "Acquisition talks continue to anchor expectations."
+    )
+    report = checker.check(
+        draft,
+        "Stock market valuation impact",
+        "Financial implications",
+    )
+    assert report.warning is not None
+    assert "THESIS" in report.warning
+
+
+def test_causal_completeness_flags_shallow_event_sentences():
+    checker = CausalCompletenessChecker()
+
+    draft = (
+        "The merger was announced yesterday [S1]. "
+        "The acquisition deal was reported widely [S1]. "
+        "Valuation will rise."
+    )
+    report = checker.check(draft, "Market valuation", "Deal impact")
+    assert report.warning is not None
+    assert "causal" in report.warning.lower() or "mechanism" in report.warning.lower()
+

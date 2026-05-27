@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
+
+from dotenv import dotenv_values
 
 _backend_dir = Path(__file__).resolve().parent.parent
 _root_dir = _backend_dir.parent
@@ -24,19 +25,9 @@ if str(_backend_dir) not in sys.path:
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
-    out: dict[str, str] = {}
     if not path.is_file():
-        return out
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", line)
-        if not m:
-            continue
-        key, val = m.group(1), m.group(2).strip().strip("'").strip('"')
-        out[key] = val
-    return out
+        return {}
+    return {k: v for k, v in dotenv_values(path).items() if v is not None}
 
 
 def main() -> int:

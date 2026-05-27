@@ -69,6 +69,37 @@ def run_async(coro, timeout: float | None = None):
     return future.result(timeout=timeout)
 
 
+def _graphiti_small_model(primary_model: str) -> str:
+    """Model for Graphiti ModelSize.small steps (edge dedup, etc.).
+
+    We intentionally keep Graphiti "small" steps on the same model as the primary
+    Graphiti LLM to avoid introducing a separate provider/model setting.
+    """
+    return primary_model
+
+
+def _graphiti_llm_config(
+    *,
+    model: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> Any:
+    from graphiti_core.llm_client.config import LLMConfig
+
+    return LLMConfig(
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        small_model=_graphiti_small_model(model),
+    )
+
+
+def _create_graphiti_openai_llm(config: Any) -> Any:
+    from graphiti_core.llm_client.openai_client import OpenAIClient
+
+    return OpenAIClient(config=config)
+
+
 def _set_default_openai_env() -> None:
     """Provide Graphiti's OpenAI-compatible defaults from MiroFish config."""
     if Config.LLM_PROVIDER == "azure":
@@ -77,8 +108,12 @@ def _set_default_openai_env() -> None:
         os.environ.setdefault("OPENAI_API_KEY", effective_llm_api_key_or_vertex_token())
         os.environ.setdefault("OPENAI_BASE_URL", effective_llm_base_url())
     elif Config.LLM_PROVIDER == "ollama":
-        os.environ.setdefault("OPENAI_API_KEY", "ollama")
-        os.environ.setdefault("OPENAI_BASE_URL", Config.OLLAMA_BASE_URL)
+        # Force local Ollama so stale cloud OPENAI_* vars cannot leak in.
+        os.environ["OPENAI_API_KEY"] = "ollama"
+        os.environ["OPENAI_BASE_URL"] = Config.OLLAMA_BASE_URL
+        if Config.LLM_MODEL_NAME:
+            os.environ["MODEL_NAME"] = Config.LLM_MODEL_NAME
+        return
     else:
         if Config.LLM_API_KEY:
             os.environ.setdefault("OPENAI_API_KEY", Config.LLM_API_KEY)
@@ -90,11 +125,11 @@ def _set_default_openai_env() -> None:
 
 def _build_openai_clients() -> tuple[Any | None, Any | None, Any | None]:
     from graphiti_core.embedder.openai import OpenAIEmbedder, OpenAIEmbedderConfig
-    from graphiti_core.llm_client.config import LLMConfig
-    from graphiti_core.llm_client.openai_client import OpenAIClient
 
     api_key, base_url, model = _resolve_openai_compat_llm_params()
-    llm = OpenAIClient(config=LLMConfig(api_key=api_key, base_url=base_url, model=model))
+    llm = _create_graphiti_openai_llm(
+        _graphiti_llm_config(api_key=api_key, base_url=base_url, model=model)
+    )
     embedder = OpenAIEmbedder(
         config=OpenAIEmbedderConfig(
             api_key=api_key,
@@ -110,7 +145,6 @@ def _build_azure_clients() -> tuple[Any | None, Any | None, Any | None]:
         from openai import AsyncAzureOpenAI
         from graphiti_core.embedder.azure_openai import AzureOpenAIEmbedderClient
         from graphiti_core.llm_client.azure_openai_client import AzureOpenAILLMClient
-        from graphiti_core.llm_client.config import LLMConfig
     except Exception as exc:
         raise RuntimeError("Graphiti Azure clients are not available") from exc
 
@@ -119,9 +153,10 @@ def _build_azure_clients() -> tuple[Any | None, Any | None, Any | None]:
         azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
         api_version=Config.AZURE_OPENAI_API_VERSION,
     )
+    deployment = Config.AZURE_OPENAI_DEPLOYMENT
     llm = AzureOpenAILLMClient(
         azure_client=azure_client,
-        config=LLMConfig(model=Config.AZURE_OPENAI_DEPLOYMENT),
+        config=_graphiti_llm_config(model=deployment),
     )
     embedder = AzureOpenAIEmbedderClient(
         azure_client=azure_client,
@@ -161,7 +196,7 @@ def _build_gemini_clients() -> tuple[Any | None, Any | None, Any | None]:
             client_kwargs = {"api_key": api_key}
 
     genai_client = genai.Client(**client_kwargs)
-    llm = GeminiClient(config=LLMConfig(model=model), client=genai_client)
+    llm = GeminiClient(config=_graphiti_llm_config(model=model), client=genai_client)
     embedder = GeminiEmbedder(
         config=GeminiEmbedderConfig(
             embedding_model=Config.GRAPHITI_GEMINI_EMBEDDING_MODEL,
@@ -190,12 +225,12 @@ def _resolve_openai_compat_llm_params() -> tuple[str, str | None, str]:
 def _build_local_embedder_clients() -> tuple[Any, Any, None]:
     """Local HF embedder + OpenAI-compatible LLM (works for any provider)."""
     from .local_embedder import LocalHuggingFaceEmbedder
-    from graphiti_core.llm_client.config import LLMConfig
-    from graphiti_core.llm_client.openai_client import OpenAIClient
 
     local_emb = LocalHuggingFaceEmbedder(model_name=Config.GRAPHITI_LOCAL_EMBEDDING_MODEL)
     api_key, base_url, llm_model = _resolve_openai_compat_llm_params()
-    llm = OpenAIClient(config=LLMConfig(api_key=api_key, base_url=base_url, model=llm_model))
+    llm = _create_graphiti_openai_llm(
+        _graphiti_llm_config(api_key=api_key, base_url=base_url, model=llm_model)
+    )
     return llm, local_emb, None
 
 
@@ -255,7 +290,7 @@ def get_client():
             llm_client=llm_client,
             embedder=embedder,
             cross_encoder=cross_encoder,
-            max_coroutines=Config.GRAPHITI_SEMAPHORE_LIMIT,
+            max_coroutines=Config.graphiti_effective_semaphore_limit(),
         )
     run_async(_ensure_indices(_client))
     return _client

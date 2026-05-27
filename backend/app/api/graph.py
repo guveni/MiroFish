@@ -263,8 +263,9 @@ def generate_ontology():
         uploaded_files = request.files.getlist('files') or []
         has_file_upload = any(f and f.filename for f in uploaded_files)
 
+        force = _form_bool(request.form.get('force'))
         checkpoint = None
-        if Config.RESUME_FROM_CHECKPOINT and requested_project_id:
+        if Config.RESUME_FROM_CHECKPOINT and requested_project_id and not force:
             checkpoint = load_project_stage_checkpoint(
                 requested_project_id,
                 "ontology_generated",

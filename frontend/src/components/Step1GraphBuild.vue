@@ -33,10 +33,20 @@
             </span>
           </div>
 
-          <!-- Error + Retry -->
-          <div v-if="stepErrors?.ontology && currentPhase === 0" class="step-error-section">
+          <!-- Error Message -->
+          <div v-if="stepErrors?.ontology && currentPhase === 0" class="step-error-section" style="margin-bottom: 12px;">
             <span class="error-text">{{ stepErrors.ontology }}</span>
-            <button class="retry-btn" @click="emit('retry-ontology')">↺ Retry</button>
+          </div>
+
+          <!-- Stage Trigger Actions -->
+          <div class="step-actions" style="margin-bottom: 16px;">
+            <button 
+              class="retry-btn" 
+              :disabled="currentPhase === 0 && ontologyProgress && !stepErrors?.ontology"
+              @click="emit('retry-ontology')"
+            >
+              ↺ {{ projectData?.ontology ? 'Regenerate Ontology' : 'Start Ontology' }}
+            </button>
           </div>
 
           <!-- Detail Overlay -->
@@ -176,10 +186,20 @@
             {{ $t('step1.graphRagDesc') }}
           </p>
           
-          <!-- Error + Retry -->
-          <div v-if="stepErrors?.build && currentPhase === 1" class="step-error-section">
+          <!-- Error Message -->
+          <div v-if="stepErrors?.build && currentPhase === 1" class="step-error-section" style="margin-bottom: 12px;">
             <span class="error-text">{{ stepErrors.build }}</span>
-            <button class="retry-btn" @click="emit('retry-build')">↺ Retry</button>
+          </div>
+
+          <!-- Stage Trigger Actions -->
+          <div class="step-actions" style="margin-bottom: 16px;">
+            <button 
+              class="retry-btn" 
+              :disabled="!projectData?.ontology || (currentPhase === 1 && buildProgress && !stepErrors?.build)"
+              @click="emit('retry-build')"
+            >
+              ↺ {{ projectData?.graph_id ? 'Rebuild Graph' : 'Start Graph Build' }}
+            </button>
           </div>
 
           <!-- Stats Cards -->
