@@ -2583,10 +2583,25 @@ watch(isConsoleCollapsed, (newVal) => {
 
 /* Printing CSS */
 @media print {
-  body * {
+  :global(html),
+  :global(body),
+  :global(.main-view),
+  :global(.content-area),
+  :global(.panel-wrapper.right) {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  :global(body) * {
     visibility: hidden;
   }
   
+  .report-panel,
+  .main-split-layout {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
   .left-panel.report-style,
   .left-panel.report-style *,
   .report-content-wrapper,
@@ -2595,7 +2610,7 @@ watch(isConsoleCollapsed, (newVal) => {
   }
   
   .left-panel.report-style {
-    position: absolute;
+    position: static !important;
     left: 0;
     top: 0;
     width: 100% !important;
@@ -2604,6 +2619,7 @@ watch(isConsoleCollapsed, (newVal) => {
     margin: 0 !important;
     border: none !important;
     overflow: visible !important;
+    height: auto !important;
   }
   
   .report-content-wrapper {

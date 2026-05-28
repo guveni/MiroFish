@@ -386,7 +386,7 @@ def prepare_simulation():
             "simulation_id": "sim_xxxx",                   // Required, Simulation ID
             "entity_types": ["Student", "PublicFigure"],  // Optional, specify entity types
             "use_llm_for_profiles": true,                 // Optional, whether to use LLM to generate personas
-            "parallel_profile_count": 20,                  // Optional, number of parallel profile generations, default 20
+            "parallel_profile_count": 20,                  // Optional, number of parallel profile generations, defaults to SIM_PROFILE_PARALLEL_COUNT
             "force_regenerate": false                     // Optional, force regeneration, default false
         }
     
@@ -471,7 +471,7 @@ def prepare_simulation():
         
         entity_types_list = data.get('entity_types')
         use_llm_for_profiles = data.get('use_llm_for_profiles', True)
-        parallel_profile_count = data.get('parallel_profile_count', 20)
+        parallel_profile_count = int(data.get('parallel_profile_count', Config.SIM_PROFILE_PARALLEL_COUNT))
         
         # ========== Synchronously retrieve entity count (before background task starts) ==========
         # This allows the frontend to obtain the expected total Agent count immediately after calling prepare

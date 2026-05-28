@@ -321,7 +321,7 @@ class SimulationManager:
         defined_entity_types: Optional[List[str]] = None,
         use_llm_for_profiles: bool = True,
         progress_callback: Optional[callable] = None,
-        parallel_profile_count: int = 20
+        parallel_profile_count: int = Config.SIM_PROFILE_PARALLEL_COUNT
     ) -> SimulationState:
         """
         Prepare the simulation environment end to end.

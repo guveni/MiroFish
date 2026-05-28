@@ -133,7 +133,7 @@ def parse_llm_json_response(text: str) -> Dict[str, Any]:
 
 
 class LLMClient:
-    """Small OpenAI-compatible facade for OpenAI, Azure OpenAI, Vertex, and Ollama."""
+    """Small OpenAI-compatible facade for OpenAI, Azure OpenAI, Vertex, Ollama, and Lambda."""
     
     @classmethod
     def for_composer(cls) -> "LLMClient":
@@ -161,9 +161,12 @@ class LLMClient:
             self._vertex = self.provider == "vertex" or is_vertex_ai_enabled()
         self._azure = self.provider == "azure"
         self._ollama = self.provider == "ollama"
+        self._lambda = self.provider == "lambda"
 
         if self._ollama:
             resolved_base = base_url or Config.OLLAMA_BASE_URL
+        elif self._lambda:
+            resolved_base = base_url or Config.LAMBDA_BASE_URL
         elif self._vertex:
             if base_url:
                 resolved_base = base_url
@@ -197,8 +200,8 @@ class LLMClient:
         )
         self.api_key = api_key
 
-        if self.provider not in ("openai", "azure", "vertex", "ollama"):
-            raise ValueError(f"LLM provider {self.provider} must be one of: openai, azure, vertex, ollama")
+        if self.provider not in ("openai", "azure", "vertex", "ollama", "lambda"):
+            raise ValueError(f"LLM provider {self.provider} must be one of: openai, azure, vertex, ollama, lambda")
 
         self.client = None
         self.async_client = None
@@ -228,11 +231,25 @@ class LLMClient:
                 azure_endpoint=endpoint,
                 api_version=Config.AZURE_OPENAI_API_VERSION,
             )
-        elif self._ollama or not self._vertex:
-            key = self.api_key or (Config.COMPOSER_LLM_API_KEY if hasattr(Config, "COMPOSER_LLM_API_KEY") and Config.COMPOSER_LLM_API_KEY and provider else ("ollama" if self._ollama else Config.LLM_API_KEY))
-            
+        elif self._ollama or self._lambda or not self._vertex:
+            key = self.api_key or (
+                Config.COMPOSER_LLM_API_KEY
+                if hasattr(Config, "COMPOSER_LLM_API_KEY")
+                and Config.COMPOSER_LLM_API_KEY
+                and provider
+                else (
+                    "ollama"
+                    if self._ollama
+                    else (Config.LAMBDA_API_KEY if self._lambda else Config.LLM_API_KEY)
+                )
+            )
+
             if self.provider == "openai" and not key:
                 raise ValueError("LLM_API_KEY or COMPOSER_LLM_API_KEY is not configured")
+            if self.provider == "lambda" and not key:
+                raise ValueError(
+                    "LAMBDA_API_KEY, LLM_API_KEY, or COMPOSER_LLM_API_KEY is not configured"
+                )
                 
             self.client = wrap_openai_client(
                 OpenAI(api_key=key or "ollama", base_url=self.base_url),

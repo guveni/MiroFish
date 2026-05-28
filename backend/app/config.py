@@ -61,11 +61,13 @@ class Config:
     # JSON settings. Keep Unicode readable instead of escaping it as \uXXXX.
     JSON_AS_ASCII = False
     
-    # LLM settings. LLM_PROVIDER choices: openai, azure, vertex, ollama.
+    # LLM settings. LLM_PROVIDER choices: openai, azure, vertex, ollama, lambda.
     LLM_PROVIDER = _llm_provider()
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     OLLAMA_BASE_URL = (os.environ.get('OLLAMA_BASE_URL') or 'http://localhost:11434/v1').strip()
+    LAMBDA_API_KEY = os.environ.get('LAMBDA_API_KEY')
+    LAMBDA_BASE_URL = (os.environ.get('LAMBDA_BASE_URL') or 'https://api.lambdalabs.com/v1').strip()
     LLM_MODEL_NAME = (os.environ.get('LLM_MODEL_NAME') or '').strip()
     LLM_USE_VERTEX_AI = (
         LLM_PROVIDER == 'vertex'
@@ -170,6 +172,7 @@ class Config:
     OASIS_DEFAULT_MAX_ROUNDS = int(os.environ.get('OASIS_DEFAULT_MAX_ROUNDS', '10'))
     OASIS_SIMULATION_DATA_DIR = os.path.join(os.path.dirname(__file__), '../uploads/simulations')
     SIM_CONFIG_MAX_WORKERS = int(os.environ.get('SIM_CONFIG_MAX_WORKERS', '8'))
+    SIM_PROFILE_PARALLEL_COUNT = int(os.environ.get('SIM_PROFILE_PARALLEL_COUNT', '20'))
     
     # OASIS platform actions
     OASIS_TWITTER_ACTIONS = [
@@ -223,10 +226,13 @@ class Config:
     def validate(cls):
         """Validate required configuration."""
         errors = []
-        if cls.LLM_PROVIDER not in ('openai', 'azure', 'vertex', 'ollama'):
-            errors.append("LLM_PROVIDER must be one of: openai, azure, vertex, ollama")
+        if cls.LLM_PROVIDER not in ('openai', 'azure', 'vertex', 'ollama', 'lambda'):
+            errors.append("LLM_PROVIDER must be one of: openai, azure, vertex, ollama, lambda")
         if cls.LLM_PROVIDER == 'ollama':
             pass  # Ollama needs no credentials; API key is a dummy.
+        elif cls.LLM_PROVIDER == 'lambda':
+            if not (cls.LAMBDA_API_KEY or cls.LLM_API_KEY):
+                errors.append("LAMBDA_API_KEY or LLM_API_KEY is not configured")
         elif cls.LLM_PROVIDER == 'azure':
             if not cls.AZURE_OPENAI_ENDPOINT:
                 errors.append("AZURE_OPENAI_ENDPOINT is not configured")
@@ -266,11 +272,20 @@ class Config:
         if cls.REPORT_USE_COMPOSER:
             if not cls.COMPOSER_LLM_PROVIDER:
                 errors.append("COMPOSER_LLM_PROVIDER must be configured when REPORT_USE_COMPOSER is true")
-            elif cls.COMPOSER_LLM_PROVIDER not in ('openai', 'azure', 'vertex', 'ollama'):
-                errors.append("COMPOSER_LLM_PROVIDER must be one of: openai, azure, vertex, ollama")
+            elif cls.COMPOSER_LLM_PROVIDER not in ('openai', 'azure', 'vertex', 'ollama', 'lambda'):
+                errors.append("COMPOSER_LLM_PROVIDER must be one of: openai, azure, vertex, ollama, lambda")
             if cls.COMPOSER_LLM_PROVIDER == 'azure':
                 if not cls.COMPOSER_LLM_BASE_URL and not cls.AZURE_OPENAI_ENDPOINT:
                     errors.append("AZURE_OPENAI_ENDPOINT or COMPOSER_LLM_BASE_URL must be configured for Azure composer")
+            elif cls.COMPOSER_LLM_PROVIDER == 'lambda':
+                if not (
+                    cls.COMPOSER_LLM_API_KEY
+                    or cls.LAMBDA_API_KEY
+                    or cls.LLM_API_KEY
+                ):
+                    errors.append(
+                        "COMPOSER_LLM_API_KEY, LAMBDA_API_KEY, or LLM_API_KEY must be configured for Lambda composer"
+                    )
             elif cls.COMPOSER_LLM_PROVIDER == 'vertex':
                 proj = cls.COMPOSER_LLM_VERTEX_PROJECT_ID or cls.VERTEX_AI_PROJECT_ID or os.environ.get('GOOGLE_CLOUD_PROJECT') or os.environ.get('GCP_PROJECT')
                 loc = cls.COMPOSER_LLM_VERTEX_LOCATION or cls.VERTEX_AI_LOCATION

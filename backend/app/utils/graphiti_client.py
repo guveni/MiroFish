@@ -107,6 +107,16 @@ def _set_default_openai_env() -> None:
     if Config.LLM_PROVIDER == "vertex":
         os.environ.setdefault("OPENAI_API_KEY", effective_llm_api_key_or_vertex_token())
         os.environ.setdefault("OPENAI_BASE_URL", effective_llm_base_url())
+    elif Config.LLM_PROVIDER == "lambda":
+        # Lambda is OpenAI-compatible; expose credentials/URL via OPENAI_* for
+        # Graphiti internals that instantiate OpenAI clients from env vars.
+        api_key = (Config.LAMBDA_API_KEY or Config.LLM_API_KEY or "").strip()
+        if api_key:
+            os.environ["OPENAI_API_KEY"] = api_key
+        os.environ["OPENAI_BASE_URL"] = Config.LAMBDA_BASE_URL
+        if Config.LLM_MODEL_NAME:
+            os.environ["MODEL_NAME"] = Config.LLM_MODEL_NAME
+        return
     elif Config.LLM_PROVIDER == "ollama":
         # Force local Ollama so stale cloud OPENAI_* vars cannot leak in.
         os.environ["OPENAI_API_KEY"] = "ollama"
@@ -213,6 +223,9 @@ def _resolve_openai_compat_llm_params() -> tuple[str, str | None, str]:
     if Config.LLM_PROVIDER == "vertex":
         api_key = effective_llm_api_key_or_vertex_token()
         base_url = effective_llm_base_url()
+    elif Config.LLM_PROVIDER == "lambda":
+        api_key = (Config.LAMBDA_API_KEY or Config.LLM_API_KEY or "").strip()
+        base_url = Config.LAMBDA_BASE_URL
     elif Config.LLM_PROVIDER == "ollama":
         api_key = "ollama"
         base_url = Config.OLLAMA_BASE_URL
