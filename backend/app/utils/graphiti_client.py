@@ -96,8 +96,12 @@ def _graphiti_llm_config(
 
 def _create_graphiti_openai_llm(config: Any) -> Any:
     from graphiti_core.llm_client.openai_client import OpenAIClient
+    from openai import AsyncOpenAI
+    from app.utils.openai_tracing import wrap_openai_client
 
-    return OpenAIClient(config=config)
+    raw_client = AsyncOpenAI(api_key=config.api_key, base_url=config.base_url)
+    wrapped_client = wrap_openai_client(raw_client, model=config.model)
+    return OpenAIClient(config=config, client=wrapped_client)
 
 
 def _set_default_openai_env() -> None:
@@ -158,12 +162,21 @@ def _build_azure_clients() -> tuple[Any | None, Any | None, Any | None]:
     except Exception as exc:
         raise RuntimeError("Graphiti Azure clients are not available") from exc
 
-    azure_client = AsyncAzureOpenAI(
-        api_key=Config.AZURE_OPENAI_API_KEY,
-        azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
-        api_version=Config.AZURE_OPENAI_API_VERSION,
-    )
     deployment = Config.AZURE_OPENAI_DEPLOYMENT
+    from typing import cast
+    from app.utils.openai_tracing import wrap_openai_client
+
+    azure_client = cast(
+        AsyncAzureOpenAI,
+        wrap_openai_client(
+            AsyncAzureOpenAI(
+                api_key=Config.AZURE_OPENAI_API_KEY,
+                azure_endpoint=Config.AZURE_OPENAI_ENDPOINT,
+                api_version=Config.AZURE_OPENAI_API_VERSION,
+            ),
+            model=deployment,
+        ),
+    )
     llm = AzureOpenAILLMClient(
         azure_client=azure_client,
         config=_graphiti_llm_config(model=deployment),

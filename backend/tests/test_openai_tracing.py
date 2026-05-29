@@ -140,3 +140,43 @@ def test_langsmith_output_processor_patch_adds_manual_costs(monkeypatch):
     assert processed["usage_metadata"]["input_cost"] == 0.001
     assert processed["usage_metadata"]["output_cost"] == 0.001
     assert processed["usage_metadata"]["total_cost"] == 0.002
+
+
+def test_wrap_openai_client_handles_async_client(monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_some_key")
+
+    from openai import AsyncOpenAI
+    from app.utils.openai_tracing import wrap_openai_client
+
+    client = AsyncOpenAI(api_key="test")
+    orig_create = client.chat.completions.create
+    wrapped = wrap_openai_client(client, model="google/gemini-3.5-flash")
+
+    # wrap_openai replaces/wraps chat.completions.create in place
+    assert wrapped.chat.completions.create != orig_create
+
+
+def test_wrap_camel_model(monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_some_key")
+
+    from app.utils.openai_tracing import wrap_camel_model
+    from openai import OpenAI, AsyncOpenAI
+
+    class DummyModel:
+        def __init__(self):
+            self._client = OpenAI(api_key="test")
+            self._async_client = AsyncOpenAI(api_key="test")
+
+    dummy = DummyModel()
+    orig_sync_create = dummy._client.chat.completions.create
+    orig_async_create = dummy._async_client.chat.completions.create
+
+    wrapped = wrap_camel_model(dummy, "gpt-4o-mini")
+
+    assert wrapped._client.chat.completions.create != orig_sync_create
+    assert wrapped._async_client.chat.completions.create != orig_async_create
+
+
+

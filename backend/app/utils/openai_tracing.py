@@ -12,7 +12,7 @@ import os
 from collections.abc import Mapping
 from typing import Any, Optional
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from ..config import Config, _normalize_vertex_genai_model
 
@@ -321,7 +321,9 @@ def attach_completion_usage_metadata(
     )
 
 
-def wrap_openai_client(client: OpenAI, *, model: Optional[str] = None) -> OpenAI:
+def wrap_openai_client(
+    client: OpenAI | AsyncOpenAI, *, model: Optional[str] = None
+) -> OpenAI | AsyncOpenAI:
     """
     Return a LangSmith-instrumented client when tracing is enabled.
     """
@@ -337,3 +339,18 @@ def wrap_openai_client(client: OpenAI, *, model: Optional[str] = None) -> OpenAI
         )
     except Exception:
         return client
+
+
+def wrap_camel_model(model_obj: Any, model_name: str) -> Any:
+    """Wrap internal OpenAI clients of a camel-ai Model object with LangSmith tracing."""
+    if not is_langsmith_openai_tracing_enabled():
+        return model_obj
+    try:
+        if hasattr(model_obj, "_client") and model_obj._client:
+            model_obj._client = wrap_openai_client(model_obj._client, model=model_name)
+        if hasattr(model_obj, "_async_client") and model_obj._async_client:
+            model_obj._async_client = wrap_openai_client(model_obj._async_client, model=model_name)
+    except Exception as e:
+        logger.warning("Failed to wrap camel model with LangSmith tracing: %s", e)
+    return model_obj
+

@@ -147,3 +147,22 @@ def test_graphiti_effective_semaphore_limit_unchanged_for_cloud(monkeypatch):
     monkeypatch.setattr(Config, "GRAPHITI_SEMAPHORE_LIMIT", 10)
     monkeypatch.setattr(Config, "GRAPHITI_OLLAMA_CONCURRENCY", 1)
     assert Config.graphiti_effective_semaphore_limit() == 10
+
+
+def test_openai_graphiti_client_is_wrapped_when_tracing_enabled(monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_some_key")
+    monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(Config, "LLM_MODEL_NAME", "gpt-4o-mini")
+    monkeypatch.setattr(Config, "GRAPHITI_EMBEDDER", "local")
+
+    from graphiti_core.llm_client.openai_client import OpenAIClient
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key="test")
+    orig_create = client.chat.completions.create
+
+    llm, _, _ = graphiti_client._build_local_embedder_clients()
+
+    assert isinstance(llm, OpenAIClient)
+    assert llm.client.chat.completions.create != orig_create
+

@@ -1047,10 +1047,12 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
             f"base_url={llm_base_url[:40] if llm_base_url else '默认'}..."
         )
     
-    return ModelFactory.create(
+    model_obj = ModelFactory.create(
         model_platform=ModelPlatformType.OPENAI,
         model_type=llm_model,
     )
+    from app.utils.openai_tracing import wrap_camel_model
+    return wrap_camel_model(model_obj, llm_model)
 
 
 def get_active_agents_for_round(

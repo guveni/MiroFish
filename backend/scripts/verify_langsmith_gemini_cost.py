@@ -73,7 +73,7 @@ def main() -> int:
     started_after = datetime.now(timezone.utc) - timedelta(seconds=5)
 
     _print_header("Live LLM call (traced)")
-    llm = LLMClient()
+    llm = LLMClient(model=model)
     try:
         text = llm.chat(
             messages=[

@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional, cast
 from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
 
 from ..config import Config
@@ -228,10 +228,16 @@ class LLMClient:
                 ),
                 model=deployment,
             )
-            self.async_client = AsyncAzureOpenAI(
-                api_key=key,
-                azure_endpoint=endpoint,
-                api_version=Config.AZURE_OPENAI_API_VERSION,
+            self.async_client = cast(
+                AsyncAzureOpenAI,
+                wrap_openai_client(
+                    AsyncAzureOpenAI(
+                        api_key=key,
+                        azure_endpoint=endpoint,
+                        api_version=Config.AZURE_OPENAI_API_VERSION,
+                    ),
+                    model=deployment,
+                ),
             )
         elif self._ollama or self._lambda or not self._vertex:
             key = self.api_key or (
@@ -257,8 +263,14 @@ class LLMClient:
                 OpenAI(api_key=key or "ollama", base_url=self.base_url),
                 model=self.model,
             )
-            self.async_client = AsyncOpenAI(
-                api_key=key or "ollama", base_url=self.base_url,
+            self.async_client = cast(
+                AsyncOpenAI,
+                wrap_openai_client(
+                    AsyncOpenAI(
+                        api_key=key or "ollama", base_url=self.base_url,
+                    ),
+                    model=self.model,
+                ),
             )
 
     def _active_client(self) -> OpenAI:
@@ -276,7 +288,13 @@ class LLMClient:
         if self._vertex:
             from .vertex_openai import get_vertex_access_token
             key = get_vertex_access_token()
-            return AsyncOpenAI(api_key=key, base_url=self.base_url)
+            return cast(
+                AsyncOpenAI,
+                wrap_openai_client(
+                    AsyncOpenAI(api_key=key, base_url=self.base_url),
+                    model=self.model,
+                ),
+            )
         assert self.async_client is not None
         return self.async_client
     
