@@ -2,6 +2,24 @@ from app.config import Config
 from app.utils import graphiti_client
 
 
+def test_vertex_gemini_with_local_embedder_uses_native_gemini_llm(monkeypatch):
+    monkeypatch.setattr(Config, "LLM_PROVIDER", "vertex")
+    monkeypatch.setattr(Config, "LLM_USE_VERTEX_AI", True)
+    monkeypatch.setattr(Config, "LLM_MODEL_NAME", "google/gemini-3.5-flash")
+    monkeypatch.setattr(Config, "VERTEX_AI_PROJECT_ID", "test-project")
+    monkeypatch.setattr(Config, "VERTEX_AI_LOCATION", "us-central1")
+    monkeypatch.setattr(Config, "GRAPHITI_EMBEDDER", "local")
+    monkeypatch.setattr(Config, "GRAPHITI_GEMINI_EMBEDDING_MODEL", "gemini-embedding-001")
+    monkeypatch.setattr(Config, "GRAPHITI_GEMINI_EMBEDDING_DIM", 1024)
+    from graphiti_core.llm_client.gemini_client import GeminiClient
+
+    llm, embedder, _ = graphiti_client._build_local_embedder_clients()
+
+    assert isinstance(llm, GeminiClient)
+    assert llm.model == "gemini-3.5-flash"
+    assert embedder is not None
+
+
 def test_ollama_graphiti_clients_use_openai_client(monkeypatch):
     monkeypatch.setattr(Config, "LLM_PROVIDER", "ollama")
     monkeypatch.setattr(Config, "LLM_MODEL_NAME", "qwen2.5:14b-instruct-q4_K_M")

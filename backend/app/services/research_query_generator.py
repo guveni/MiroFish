@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 RESEARCH_QUERY_SYSTEM = """You are a research assistant. Given a simulation / prediction requirement, output a small set of short search queries to gather factual context from a search index.
 
+CRITICAL INSTRUCTION:
+Your search queries must actively target and extract concrete, real-world examples, specific target entities, and niche companies/vendors related to the requirement.
+For example, if the requirement asks to identify "underpriced companies" or "bottleneck providers" in an industry (e.g., semiconductor, memory, Edge AI, energy), do NOT just query generic concepts like "market potential" or "industry trends". Instead, generate queries to hunt for specific, concrete companies, micro-cap stocks, components, technical innovators, and real-world players in those fields.
+
 Rules:
 - Return ONLY valid JSON with shape: {"queries": ["...", ...]}
 - Queries must be concise (each under 120 characters), self-contained, and suitable for keyword / semantic search.
@@ -55,7 +59,7 @@ class ResearchQueryGenerator:
         data: Dict[str, Any] = run_pipeline_step(
             "research_queries_llm_json",
             lambda: self._llm.chat_json(
-                messages=messages, temperature=0.2, max_tokens=1024
+                messages=messages, temperature=0.2, max_tokens=4096
             ),
         )
         raw = data.get("queries", [])

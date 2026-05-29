@@ -63,3 +63,21 @@ def test_parse_llm_json_response_closes_truncated_json():
 def test_parse_llm_json_response_raises_on_unrecoverable_json():
     with pytest.raises(ValueError, match="LLM returned invalid JSON"):
         parse_llm_json_response("not json at all")
+
+
+def test_parse_llm_json_response_repairs_trailing_garbage_with_multiple_quotes():
+    corrupted = """
+{
+    "entity_types": [],
+    "edge_types": [],
+    "analysis_summary": "This ontology is designed to model..."
+    without losing structural integrity."
+    integrity."
+    integrity."
+}
+"""
+    parsed = parse_llm_json_response(corrupted)
+    assert parsed["entity_types"] == []
+    assert parsed["edge_types"] == []
+    assert parsed["analysis_summary"] == "This ontology is designed to model..."
+

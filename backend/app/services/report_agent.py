@@ -733,6 +733,7 @@ class ContradictionReport:
     contradictions: List[Tuple[str, int, int, str]]  # (entity, S_a, S_b, reason)
     warning: Optional[str]
     summary: str
+    detailed_contradictions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class ContradictionDetector:
@@ -795,6 +796,7 @@ class ContradictionDetector:
                     })
 
         contradictions = []
+        detailed_contradictions = []
         for i in range(len(entity_data)):
             for j in range(i + 1, len(entity_data)):
                 d1 = entity_data[i]
@@ -805,6 +807,14 @@ class ContradictionDetector:
                     if src_1 != src_2:
                         reason = f"Entity '{d1['entity']}' has positive/growth indicators in Sentence A ({src_1}) but negative/decline indicators in Sentence B ({src_2})."
                         contradictions.append((d1["entity"], src_1, src_2, reason))
+                        detailed_contradictions.append({
+                            "entity": d1["entity"],
+                            "src_1": src_1,
+                            "src_2": src_2,
+                            "reason": reason,
+                            "sent_1": d1["sent"],
+                            "sent_2": d2["sent"]
+                        })
 
         if contradictions:
             warning = f"⚠️ CONTRADICTION DETECTED: Found opposing claims for: {', '.join(set(c[0] for c in contradictions))}. Resolve conflicting evidence or clarify temporal order."
@@ -816,7 +826,8 @@ class ContradictionDetector:
         return ContradictionReport(
             contradictions=contradictions,
             warning=warning,
-            summary=summary
+            summary=summary,
+            detailed_contradictions=detailed_contradictions
         )
 
 
@@ -830,6 +841,7 @@ class NumericalSanityReport:
     anomalies: List[str]
     warning: Optional[str]
     summary: str
+    detailed_anomalies: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class NumericalSanityChecker:
@@ -841,11 +853,24 @@ class NumericalSanityChecker:
 
     def check(self, draft: str, sources_metadata: List[Tuple[int, str, str]], module: Optional[Any] = None) -> NumericalSanityReport:
         anomalies = []
+        detailed_anomalies = []
         if module:
             # Consume domain-specific sanity checks
-            anomalies.extend(module.check_numerical_sanity(draft, sources_metadata))
+            for domain_anom in module.check_numerical_sanity(draft, sources_metadata):
+                anomalies.append(domain_anom)
+                detailed_anomalies.append({
+                    "type": "domain_sanity",
+                    "sentence": "",
+                    "message": domain_anom
+                })
             if hasattr(module, 'check_quantitative_grounding'):
-                anomalies.extend(module.check_quantitative_grounding(draft, sources_metadata))
+                for domain_ground in module.check_quantitative_grounding(draft, sources_metadata):
+                    anomalies.append(domain_ground)
+                    detailed_anomalies.append({
+                        "type": "domain_grounding",
+                        "sentence": "",
+                        "message": domain_ground
+                    })
         draft_clean = re.sub(r'<self_critique>.*?</self_critique>', '', draft, flags=re.DOTALL)
         sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', draft_clean) if len(s.strip()) > 15]
 
@@ -862,7 +887,13 @@ class NumericalSanityChecker:
             if any(term in sent_lower for term in ["support", "sentiment", "share", "proportion", "percentage", "rate"]):
                 for val in pct_vals:
                     if val > 100.0:
-                        anomalies.append(f"Individual percentage {val}% exceeds 100% in a proportional context: '{sent[:80]}...'")
+                        anomaly_msg = f"Individual percentage {val}% exceeds 100% in a proportional context: '{sent[:80]}...'"
+                        anomalies.append(anomaly_msg)
+                        detailed_anomalies.append({
+                            "type": "proportional_exceed",
+                            "sentence": sent,
+                            "message": anomaly_msg
+                        })
 
             # Check sums if there are multiple percentages in the sentence
             if len(pct_vals) >= 2 and any(term in sent_lower for term in ["total", "sum", "combine", "support", "oppose", "neutral"]):
@@ -871,7 +902,13 @@ class NumericalSanityChecker:
                     any(p in sent_lower for p in ["support", "oppose"]) and any(n in sent_lower for n in ["neutral", "observer"])
                 ):
                     if total_pct > 105.0 or total_pct < 90.0:
-                        anomalies.append(f"Breakdown percentages sum to {total_pct}% (should be ~100%): '{sent[:80]}...'")
+                        anomaly_msg = f"Breakdown percentages sum to {total_pct}% (should be ~100%): '{sent[:80]}...'"
+                        anomalies.append(anomaly_msg)
+                        detailed_anomalies.append({
+                            "type": "breakdown_sum",
+                            "sentence": sent,
+                            "message": anomaly_msg
+                        })
 
         # 2. Order of Magnitude Mismatch with cited observation
         sources_dict = {num: (tool, result) for num, tool, result in sources_metadata}
@@ -908,7 +945,14 @@ class NumericalSanityChecker:
                                 different_magnitude = True
                                 break
                         if matched_in_src and different_magnitude:
-                            anomalies.append(f"Potential order of magnitude mismatch for {val_str} ({suffix} in draft vs different scale in source [S{src_num}]).")
+                            anomaly_msg = f"Potential order of magnitude mismatch for {val_str} ({suffix} in draft vs different scale in source [S{src_num}])."
+                            anomalies.append(anomaly_msg)
+                            detailed_anomalies.append({
+                                "type": "order_of_magnitude",
+                                "sentence": sent,
+                                "message": anomaly_msg,
+                                "source_num": src_num
+                            })
 
         if anomalies:
             warning = f"⚠️ NUMERICAL SANITY WARNING: Found {len(anomalies)} mathematical or scale anomalies. Double-check percentage breakdowns and scaling."
@@ -920,7 +964,8 @@ class NumericalSanityChecker:
         return NumericalSanityReport(
             anomalies=anomalies,
             warning=warning,
-            summary=summary
+            summary=summary,
+            detailed_anomalies=detailed_anomalies
         )
 
 
@@ -1001,7 +1046,7 @@ class ConfidenceCoverageChecker:
     _CONFIDENCE_LABELS = [
         "high confidence", "medium confidence", "low confidence", "moderately likely", 
         "highly likely", "highly speculative", "probability", "probabilistic", "confidence level",
-        "certainty", "uncertainty", "speculatively", "inferred"
+        "certainty", "uncertainty", "speculatively", "inferred", "estimated", "modeled", "measured"
     ]
     _CONFIDENT_KEYWORDS = ["will", "definitely", "clearly", "obviously", "certainly", "proves", "undoubtedly", "always"]
 
@@ -2133,12 +2178,13 @@ Workflow:
 TOOL_DESC_WEB_SEARCH = """\
 [Web Search — get up-to-date real-time external information]
 Searches the web for the latest, real-time news, developments, facts, or data that may not exist in the simulation database.
-This is critical for ground-truth external facts or comparisons with real-world events.
+This is critical for ground-truth external facts, comparisons with real-world events, or locating missing companies and targets.
 
 [When to use]
 - Need to look up real-time information or news on the web
 - Need external context or up-to-date baseline information (e.g. standard procedures, real-world events)
 - When the query is about public facts beyond the simulation graph
+- VERY IMPORTANT: Use this tool to find and identify specific under-the-radar companies, micro-cap stocks, components, technical innovators, or bottleneck vendors when the simulation requirement asks for them but they are not fully populated in the simulation graph data.
 
 [Returns]
 - Text corpus extracted from highly relevant search results and web pages"""
@@ -2163,6 +2209,7 @@ Write a "Future Prediction Report" that answers:
 - Agent behavior in the simulated world is itself a prediction of future human behavior
 - This is NOT an analysis of the current real world
 - This is NOT a generic sentiment overview
+- CRUCIAL (Epistemic rigor): The report structure MUST NOT be a single unbroken narrative of confirmation. You must plan sections that explicitly explore competing explanations, substitution risks, adaptation effects, or downside/bear scenarios.
 
 [Section count constraints]
 - Minimum 2 sections, maximum 5 sections
@@ -2204,7 +2251,8 @@ From a god's-eye view, examine this future rehearsal:
 
 Based on the prediction results, design the most suitable report section structure.
 
-[Reminder] Section count: minimum 2, maximum 5. Content should be concise and focused on core predictive findings."""
+[Reminder] Section count: minimum 2, maximum 5. Content should be concise and focused on core predictive findings.
+CRUCIAL: Be sure to include at least one section or theme that explicitly explores adversarial challenges, competing explanations, substitution risks, or bear/downside scenarios."""
 
 # ── Section generation prompt ──
 
@@ -2242,6 +2290,7 @@ Focus on "what the future looks like" — simulation results ARE the predicted f
    - All content must come from events and Agent behavior in the simulation
    - Do NOT use your own knowledge to write report content
    - Each section must call tools at least 3 times (max 5) to observe the simulated world
+   - EXCEPTION FOR EXTERNAL TARGETS: If the "Prediction scenario (simulation requirement)" explicitly asks you to explore, analyze, or identify specific real-world targets (such as specific companies, bottleneck providers, or micro-cap stocks) that are missing or underrepresented in the simulation graph, you are explicitly allowed (and encouraged!) to call `web_search` and utilize the `[Recent external facts (auto-fetched, dated)]` to incorporate these external real-world entities and facts into the report.
 
 2. [You MUST quote Agents' original words and actions]
    - Agent statements and actions are predictions of future human behavior
@@ -2259,6 +2308,7 @@ Focus on "what the future looks like" — simulation results ARE the predicted f
 4. [Faithfully present prediction results]
    - Report content must reflect the simulation results that represent the future
    - Do not add information that does not exist in the simulation
+   - EXCEPTION FOR EXTERNAL TARGETS: If specific companies, stocks, or bottleneck providers are requested by the user's simulation requirement but are not fully populated in the simulation graph, you MUST use `web_search` to find real-world players/companies fitting those descriptions, and present them as the predicted/simulated targets under those conditions.
    - If information is insufficient in some area, state that honestly
 
 ═══════════════════════════════════════════════════════════════
@@ -2267,50 +2317,45 @@ Focus on "what the future looks like" — simulation results ARE the predicted f
 
 To ensure rigorous, defensible, and analytical prediction reasoning instead of retail SEO storytelling, you MUST structure your analysis according to the following strict analytical frameworks:
 
-1. [Risk-First Ordering and Vulnerability Focus]
-   - You MUST prioritize risk-first reasoning: analyze systemic vulnerabilities, downside scenarios, friction points, and potential failure modes BEFORE describing optimistic or smooth trajectories.
-   - Begin your section by exposing the highest-impact downside or systemic friction discovered in the simulation.
+1. [Precision without Provenance Guardrail]
+   - All numerical estimates, metrics, and sizing claims MUST explicitly state their derivation.
+   - Distinguish strictly between:
+     - "Measured/Observed" (e.g., specific agent votes, concrete data points retrieved)
+     - "Estimated" (e.g., extrapolated from partial data)
+     - "Modeled" (e.g., theoretical impacts derived from causal chains)
+   - Do NOT present modeled or estimated figures as exact factual measurements.
 
-2. [Causal reasoning chain expansion]
+2. [Confidence-Governed Synthesis]
+   - Your conclusions MUST NOT exceed the strength of your supporting evidence.
+   - If the evidence is weak, mixed, or purely speculative, the conclusion must be explicitly weak, caveated, or framed as a hypothesis.
+   - Do not use confident, definitive language unless backed by overwhelming, high-epistemic-weight evidence.
+   - Follow the [PRE-SYNTHESIS EPISTEMIC MANDATE] and [NARRATIVE WEIGHT ALLOCATION] blocks when present.
+
+3. [Adversarial Reasoning & Counter-Analysis]
+   - You MUST subject every primary thesis to adversarial challenge.
+   - Explicitly include a counter-analysis block that explores:
+     - Alternative explanations for the observed data
+     - Substitution risks or adaptation effects (how agents might bypass or mitigate the core event)
+     - The Null Hypothesis / reasons the projected impact may not materialize or may not matter
+   - Do NOT center the entire section on one salient retrieved theme (Thematic Overfitting). Balance structural drivers, cyclical events, and actively seek disconfirming evidence.
+
+4. [Epistemic Discrimination & Institutional Inference Leakage]
+   - Each observation includes an Epistemic tier (SIMULATION_PRIMARY → INSTITUTIONAL → PROFESSIONAL → ANALYST_ACTION → RETAIL_COMMENTARY → SOCIAL_OPINION → SPECULATIVE).
+   - NEVER blend tiers at equal narrative weight.
+   - Do NOT attribute vague claims to institutional actors, hedge funds, or professional rotation unless directly and specifically observed in the evidence.
+   - Strict separation: What is *observed* vs what is *inferred* must be clearly demarcated.
+
+5. [Causal reasoning chain expansion]
    - Every major finding or claim MUST follow a complete causal-chain scaffold:
      `Event / Observation → Operational Impact → Financial/Economic Impact → Strategic Implications → Vulnerability/Risk Invalidation`
-   - Do not simply state "Event X occurred." Map it out completely. If a link in the chain is not direct or is missing in the simulation data, explicitly mark it as "unobserved/missing link" or deductively inferred.
+   - If a link in the chain is not direct or is missing in the simulation data, explicitly mark it as "unobserved/missing link" or deductively inferred.
 
-3. [Probabilistic Scenario Mapping (Base/Bear/Bull)]
+6. [Probabilistic Scenario Mapping (Base/Bear/Bull)]
    - You MUST conclude the section with a clear scenario mapping block:
-     - **Base Scenario** (the most likely trajectory with rough probability band, e.g., 60-70%)
-     - **Bear Scenario** (downside trajectory, probability band, e.g., 20-30%)
-     - **Bull Scenario** (upside trajectory, probability band, e.g., 10%)
-     - For each scenario, state the exact falsifiable trigger condition (what specific agent actions or metrics would shift the system into this scenario).
-
-4. [Epistemic Discrimination — evidence hierarchy is mandatory]
-   - Each observation includes an **Epistemic tier** (SIMULATION_PRIMARY → INSTITUTIONAL → PROFESSIONAL → ANALYST_ACTION → RETAIL_COMMENTARY → SOCIAL_OPINION → SPECULATIVE).
-   - **Never blend tiers at equal narrative weight.** LinkedIn comments, retail finance blogs, analyst rating changes, and speculative reactions are tentative context only — not proof of strategic conclusions.
-   - Central claims require SIMULATION_PRIMARY, INSTITUTIONAL, or PROFESSIONAL tiers when available.
-   - Mark low-tier citations explicitly: "(tentative sentiment / low epistemic weight)".
-   - If a claim rests on a single low-tier source, state that limitation and do not imply certainty.
-
-5. [Retrieval Contamination Guardrail]
-   - No single source may anchor more than ~40% of the section's factual claims.
-   - If a single retrieved headline or agent statement dominates, you must broaden your retrieval using other tools or explicitly flag the retrieval bias as an analytical constraint.
-
-5b. [Thesis Balancing — multi-driver synthesis]
-   - Balance structural drivers, cyclical drivers, temporary/episodic events, macro conditions, and company fundamentals.
-   - Do NOT center the entire section on one salient retrieved theme (e.g., a single merger headline).
-   - Episodic events belong in context, not as the sole thesis.
-
-5c. [Confidence-Governed Synthesis — behavioral, not descriptive]
-   - Follow the [PRE-SYNTHESIS EPISTEMIC MANDATE] and [NARRATIVE WEIGHT ALLOCATION] blocks when present.
-   - Match assertion strength and recommendation aggressiveness to the section confidence ceiling.
-   - synthesis_weight controls how much emphasis each source receives — override retrieval salience.
-   - Tentative-only sources (social/retail/speculative) cannot anchor strategic conclusions.
-
-6. [Quantitative and Valuation Grounding Requirement]
-   - Ground central arguments in concrete quantitative and valuation metrics. Do NOT rely on vague qualitative speculation.
-   - Wherever relevant, explicitly provide or estimate:
-     - Revenue/market sizing impact (exact numbers, percentages, or USD/currency values)
-     - Dilution/accretion and business operational outcomes (e.g., costs, margins, compliance overheads)
-     - Probability weighting for alternative trajectories (e.g. "with high confidence (70% probability based on S2)")
+     - **Base Scenario** (the most likely trajectory with rough probability band)
+     - **Bear/Risk Scenario** (downside trajectory, probability band)
+     - **Bull/Upside Scenario** (upside trajectory, probability band)
+     - For each scenario, state the EXACT falsifiable trigger condition (what specific agent actions or metrics would invalidate your thesis and shift the system into a different scenario).
 
 ═══════════════════════════════════════════════════════════════
 [Temporal Relevance Rules]
@@ -2444,11 +2489,10 @@ Then, immediately output your polished, analytical, and calibrated section conte
 
 Example format:
 <self_critique>
-- Distinguishing Fact vs Inference vs Speculation: ...
-- Source Weighting & Verification Gap: ...
-- Confidence Calibration: ...
-- Alternative Scenarios Considered: ...
-- Conditions under which this analysis fails (Falsifiability): ...
+- Adversarial Challenge (Alternative explanations / Null Hypothesis): ...
+- Provenance Check (Measured vs Estimated vs Modeled): ...
+- Epistemic Leakage Check (Are we attributing to institutions without direct proof?): ...
+- Confidence Calibration (Is our certainty matched by evidence weight?): ...
 </self_critique>
 
 Final Answer:
@@ -2513,7 +2557,7 @@ Completed sections so far (read carefully to avoid repetition):
 Begin:
 1. First think (Thought) about what information this section needs
 2. Then call a tool (Action) to retrieve simulation data
-3. Once you have enough information, write a `<self_critique>` block assessing your assumptions, analytical gaps, and confidence calibration, and then output your "Final Answer:" (pure body text, no headings)"""
+3. Once you have enough information, write a `<self_critique>` block assessing your assumptions, adversarial challenges, provenance of numbers, and confidence calibration, and then output your "Final Answer:" (pure body text, no headings)"""
 
 COMPOSER_USER_TEMPLATE = """\
 You are writing a section of a "Future Prediction Report".
@@ -2616,7 +2660,7 @@ Observation (retrieval result):
 ═══════════════════════════════════════════════════════════════
 Tools called {tool_calls_count}/{max_tool_calls} times (used: {used_tools_str}){unused_hint}
 - When you cite a fact from this result in your Final Answer, tag it with [S{source_num}] directly after the claim.
-- If you have enough information: output a `<self_critique>` block assessing assumptions, gaps, and calibration, and then output your final content starting with "Final Answer:" (must quote the original text above, with [SN] citations)
+- If you have enough information: output a `<self_critique>` block assessing assumptions, adversarial challenges, provenance of numbers, and confidence calibration, and then output your final content starting with "Final Answer:" (must quote the original text above, with [SN] citations)
 - If you need more information: call another tool to continue retrieval
 ═══════════════════════════════════════════════════════════════"""
 
@@ -2632,12 +2676,12 @@ REACT_INSUFFICIENT_TOOLS_MSG_ALT = (
 
 REACT_TOOL_LIMIT_MSG = (
     "Tool call limit reached ({tool_calls_count}/{max_tool_calls}); no more tool calls allowed. "
-    "Please perform an analytical critique in a `<self_critique>` block, and then immediately output section content starting with \"Final Answer:\" based on the information gathered."
+    "Please perform an analytical critique in a `<self_critique>` block (covering adversarial challenge, provenance, epistemic leakage, and confidence calibration), and then immediately output section content starting with \"Final Answer:\" based on the information gathered."
 )
 
 REACT_UNUSED_TOOLS_HINT = "\nTip: You have not used: {unused_list}. Consider trying different tools for multi-angle information."
 
-REACT_FORCE_FINAL_MSG = "Tool call limit reached. Please output a <self_critique> block, and then output Final Answer: and generate the section content now."
+REACT_FORCE_FINAL_MSG = "Tool call limit reached. Please output a <self_critique> block (covering adversarial challenge, provenance, and calibration), and then output Final Answer: and generate the section content now."
 
 # ── Chat prompt ──
 
@@ -3014,6 +3058,7 @@ class ReportAgent:
             "Write polished markdown only. Do not call tools, do not output JSON.\n"
             "Never use Markdown headings (#, ##, ###) in your response; use **bold text** for sub-sections instead.\n"
             "Confidence-governed synthesis is mandatory: match tone and recommendations to evidence weights and ceilings.\n"
+            "Keep the section highly focused and concise (target 800-1200 words). Do not repeat observations endlessly.\n"
             f"{get_language_instruction()}"
         )
 
@@ -3033,10 +3078,16 @@ class ReportAgent:
 
         confidence_governance = self._build_confidence_governance_block(evidence_scores)
 
+        # Truncate observation log to prevent exceeding context window of local models
+        joined_observations = "\n\n---\n\n".join(observation_log) if observation_log else "(No tool observations recorded for this section)"
+        # Roughly 16k chars ~ 4k tokens, leaves plenty of room for 8k context models
+        if len(joined_observations) > 16000:
+            joined_observations = joined_observations[:16000] + "\n\n... [Observations truncated due to length] ..."
+
         composer_user = COMPOSER_USER_TEMPLATE.format(
             section_title=section.title,
             simulation_requirement=self.simulation_requirement,
-            observations="\n\n---\n\n".join(observation_log) if observation_log else "(No tool observations recorded for this section)",
+            observations=joined_observations,
             draft=draft,
             analytical_issues=analytical_issues,
             confidence_governance=confidence_governance,
@@ -3080,16 +3131,22 @@ class ReportAgent:
             "You are a senior analyst enforcing confidence-governed analytical reasoning.\n"
             "Rewrite to fix every audit issue; downgrade overconfident prose aggressively.\n"
             "Never use Markdown headings. Output section body only.\n"
+            "Keep the output highly focused and concise (target 800-1200 words).\n"
             f"{get_language_instruction()}"
         )
 
         confidence_governance = self._build_confidence_governance_block(evidence_scores)
         analytical_issues = analytical_report.to_composer_block_with_evidence(evidence_scores)
 
+        # Truncate observation log to prevent exceeding context window
+        joined_observations = "\n\n---\n\n".join(observation_log) if observation_log else "(No observations)"
+        if len(joined_observations) > 16000:
+            joined_observations = joined_observations[:16000] + "\n\n... [Observations truncated due to length] ..."
+
         rewrite_user = CONFIDENCE_REWRITE_USER_TEMPLATE.format(
             section_title=section.title,
             simulation_requirement=self.simulation_requirement,
-            observations="\n\n---\n\n".join(observation_log) if observation_log else "(No observations)",
+            observations=joined_observations,
             current_content=content,
             analytical_issues=analytical_issues,
             confidence_governance=confidence_governance,
@@ -3310,96 +3367,254 @@ class ReportAgent:
             }
         )
 
-    def _run_cross_section_pass(self, outline: ReportOutline):
+    def _run_cross_section_pass(self, report_id: str, outline: ReportOutline):
         """
         Runs an analytical sanity and contradiction check across all sections.
         If a cross-section contradiction or numerical anomaly is found, it uses the composer
         to revise only the offending sections/paragraphs.
+        
+        This uses a bounded revalidation loop (max 2 passes) to detect, revise, persist, and re-detect.
         """
         logger.info("[Cross-Section] Starting cross-section consistency checks...")
         
-        section_map = {}
-        for i, section in enumerate(outline.sections):
-            section_map[i] = section.content
+        MAX_PASSES = 2
+        for current_pass in range(1, MAX_PASSES + 1):
+            logger.info(f"[Cross-Section] Running Pass {current_pass}/{MAX_PASSES}...")
             
-        combined_text = "\n\n".join(section_map.values())
-        
-        cross_contradictions = self._contradiction_detector.check(combined_text)
-        cross_numerical = self._numerical_sanity_checker.check(combined_text, [])
-        
-        issues_to_resolve = []
-        if cross_contradictions.contradictions:
-            for ent, s1, s2, reason in cross_contradictions.contradictions:
-                issues_to_resolve.append(f"Contradiction: {reason}")
+            section_map = {}
+            original_contents = {}
+            for i, section in enumerate(outline.sections):
+                section_map[i] = section.content
+                original_contents[i] = section.content
                 
-        if cross_numerical.anomalies:
-            for anom in cross_numerical.anomalies:
-                issues_to_resolve.append(f"Numerical Anomaly: {anom}")
-                
-        if not issues_to_resolve:
-            logger.info("[Cross-Section] No cross-section contradictions or numerical anomalies detected.")
-            return
+            combined_text = "\n\n".join(section_map.values())
             
-        logger.warning(f"[Cross-Section] Found {len(issues_to_resolve)} cross-section consistency issues.")
-        for issue in issues_to_resolve:
-            logger.warning(f"  - {issue}")
+            # Map normalized sentences back to section indices (1-based)
+            def normalize_text(text: str) -> str:
+                return re.sub(r'\s+', ' ', text).strip()
+                
+            sentence_to_section = {}
+            for i, section in enumerate(outline.sections):
+                section_num = i + 1
+                if not section.content:
+                    continue
+                # Split the section content using the exact same logic
+                sec_clean = re.sub(r'<self_critique>.*?</self_critique>', '', section.content, flags=re.DOTALL)
+                sec_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', sec_clean) if len(s.strip()) > 15]
+                for s in sec_sentences:
+                    norm_s = normalize_text(s)
+                    if norm_s not in sentence_to_section:
+                        sentence_to_section[norm_s] = set()
+                    sentence_to_section[norm_s].add(section_num)
+                    
+            def find_involved_sections(sent: str) -> List[int]:
+                norm_sent = normalize_text(sent)
+                sections_involved = set()
+                # 1. Exact match from our dictionary
+                if norm_sent in sentence_to_section:
+                    sections_involved.update(sentence_to_section[norm_sent])
+                # 2. Substring match fallback
+                for idx, sec in enumerate(outline.sections):
+                    if sec.content and norm_sent in normalize_text(sec.content):
+                        sections_involved.add(idx + 1)
+                return sorted(list(sections_involved))
+                
+            def find_sections_for_general_issue(msg: str) -> List[int]:
+                matched_sections = []
+                numbers = re.findall(r'\b\d+(?:\.\d+)?\b', msg)
+                if numbers:
+                    for idx, sec in enumerate(outline.sections):
+                        if sec.content and any(num in sec.content for num in numbers):
+                            matched_sections.append(idx + 1)
+                if not matched_sections:
+                    words = re.findall(r'\b[a-zA-Z]{4,}\b', msg.lower())
+                    common = {"potential", "mismatch", "suspicious", "detected", "discussion", "analysis", "mentions", "lacks", "concrete", "figures"}
+                    keywords = [w for w in words if w not in common]
+                    for idx, sec in enumerate(outline.sections):
+                        if sec.content:
+                            sec_lower = sec.content.lower()
+                            if any(kw in sec_lower for kw in keywords):
+                                matched_sections.append(idx + 1)
+                return sorted(list(set(matched_sections)))
+
+            # Run detection
+            cross_contradictions = self._contradiction_detector.check(combined_text)
             
-        for i, section in enumerate(outline.sections):
-            involved_issues = []
-            for issue in issues_to_resolve:
-                if "Contradiction:" in issue:
-                    match = re.search(r"Entity '([^']+)' has", issue)
-                    if match:
-                        ent_name = match.group(1)
-                        if ent_name in section.content:
-                            involved_issues.append(issue)
-                else:
-                    numbers = re.findall(r'\b\d+(?:\.\d+)?\b', issue)
-                    if any(num in section.content for num in numbers):
-                        involved_issues.append(issue)
-                        
-            if involved_issues:
-                logger.info(f"[Cross-Section] Revising section '{section.title}' to resolve cross-section issues.")
+            # Module selection for numerical sanity check
+            module = self._select_analytical_module("")
+            cross_numerical = self._numerical_sanity_checker.check(combined_text, [], module)
+            
+            # Build structured issues list
+            structured_issues = []
+            
+            # Add contradictions from detailed_contradictions
+            if hasattr(cross_contradictions, "detailed_contradictions") and cross_contradictions.detailed_contradictions:
+                for c in cross_contradictions.detailed_contradictions:
+                    sent_1 = c["sent_1"]
+                    sent_2 = c["sent_2"]
+                    sections_1 = find_involved_sections(sent_1)
+                    sections_2 = find_involved_sections(sent_2)
+                    all_involved = sorted(list(set(sections_1 + sections_2)))
+                    # Fallback to general issue matching if find_involved_sections is empty
+                    if not all_involved:
+                        all_involved = find_sections_for_general_issue(c["reason"])
+                    structured_issues.append({
+                        "type": "contradiction",
+                        "message": c["reason"],
+                        "affected_sections": all_involved,
+                        "evidence_snippets": [sent_1, sent_2]
+                    })
+            else:
+                # Fallback to raw contradictions parsing
+                for ent, s1, s2, reason in cross_contradictions.contradictions:
+                    all_involved = find_sections_for_general_issue(reason)
+                    structured_issues.append({
+                        "type": "contradiction",
+                        "message": reason,
+                        "affected_sections": all_involved,
+                        "evidence_snippets": []
+                    })
+                    
+            # Add numerical anomalies from detailed_anomalies
+            if hasattr(cross_numerical, "detailed_anomalies") and cross_numerical.detailed_anomalies:
+                for anom in cross_numerical.detailed_anomalies:
+                    sent = anom.get("sentence", "")
+                    all_involved = []
+                    if sent:
+                        all_involved = find_involved_sections(sent)
+                    if not all_involved:
+                        all_involved = find_sections_for_general_issue(anom["message"])
+                    structured_issues.append({
+                        "type": "numerical_anomaly",
+                        "message": anom["message"],
+                        "affected_sections": all_involved,
+                        "evidence_snippets": [sent] if sent else []
+                    })
+            else:
+                # Fallback to raw anomalies list
+                for anom in cross_numerical.anomalies:
+                    all_involved = find_sections_for_general_issue(anom)
+                    structured_issues.append({
+                        "type": "numerical_anomaly",
+                        "message": anom,
+                        "affected_sections": all_involved,
+                        "evidence_snippets": []
+                    })
+                    
+            if not structured_issues:
+                logger.info(f"[Cross-Section] Pass {current_pass}: No cross-section contradictions or numerical anomalies detected.")
+                break
                 
-                composer_system = (
-                    "You are a senior analyst performing a final consistency review across a multi-section prediction report.\n"
-                    "Your task is to revise and polish the section to resolve consistency errors with other sections.\n"
-                    "Write polished markdown only. Do not use Markdown headings (#, ##, ###) in your response; use **bold text** instead.\n"
-                    f"{get_language_instruction()}"
-                )
+            logger.warning(f"[Cross-Section] Pass {current_pass}: Found {len(structured_issues)} cross-section consistency issues.")
+            for issue in structured_issues:
+                logger.warning(f"  - [{issue['type']}] (Sections: {issue['affected_sections']}): {issue['message']}")
                 
-                issues_block = "\n".join(f"  - {iss}" for iss in involved_issues)
+            # Perform targeted section revisions
+            sections_revised_this_pass = set()
+            for i, section in enumerate(outline.sections):
+                section_num = i + 1
+                involved_issues = [issue for issue in structured_issues if section_num in issue["affected_sections"]]
                 
-                composer_user = (
-                    f"You are performing a final cross-section review of the section: {section.title}\n\n"
-                    f"[Prediction Requirement / Scenario]\n{self.simulation_requirement}\n\n"
-                    f"[Current Section Content]\n{section.content}\n\n"
-                    f"[Cross-Section Issues to Resolve]\n"
-                    f"Our automated validator detected the following contradictions/anomalies involving this section:\n"
-                    f"{issues_block}\n\n"
-                    f"[Instructions]\n"
-                    f"1. Revise the content to completely resolve the contradictions or numerical mismatches with other sections.\n"
-                    f"2. Ensure you keep the tone analytical, expert, and grounded. Do not introduce speculative claims unless calibrated.\n"
-                    f"3. Do NOT change parts of the text that are not involved in these issues.\n"
-                    f"4. Output ONLY the polished, revised section content. Do not include intro, outro, conversational fillers, or headings."
-                )
-                
-                try:
-                    revised_content = self.composer_llm.chat(
-                        messages=[
-                            {"role": "system", "content": composer_system},
-                            {"role": "user", "content": composer_user},
-                        ],
-                        temperature=0.3,
-                        max_tokens=Config.LLM_CHAT_MAX_TOKENS,
+                if involved_issues:
+                    logger.info(f"[Cross-Section] Revising section {section_num:02d} '{section.title}' to resolve cross-section issues.")
+                    sections_revised_this_pass.add(section_num)
+                    
+                    composer_system = (
+                        "You are a senior analyst performing a final consistency review across a multi-section prediction report.\n"
+                        "Your task is to revise and polish the section to resolve consistency errors with other sections.\n"
+                        "Write polished markdown only. Do not use Markdown headings (#, ##, ###) in your response; use **bold text** instead.\n"
+                        "Keep the section highly focused and concise (target 800-1200 words). Do not repeat observations endlessly.\n"
+                        f"{get_language_instruction()}"
                     )
-                    if revised_content and revised_content.strip():
-                        cleaned = revised_content.strip()
-                        cleaned = re.sub(r'^#+\s+.*?\n', '', cleaned)
-                        section.content = cleaned.strip()
-                        logger.info(f"[Cross-Section] Successfully resolved cross-section consistency issues for '{section.title}'")
-                except Exception as e:
-                    logger.error(f"[Cross-Section] Revision of '{section.title}' failed: {e}")
+                    
+                    # Group issues block with the conflicting snippets
+                    issues_block_parts = []
+                    for idx, issue in enumerate(involved_issues):
+                        issues_block_parts.append(f"Issue {idx + 1}: {issue['message']}")
+                        if issue["evidence_snippets"]:
+                            issues_block_parts.append("Conflicting / relevant evidence snippets in the report:")
+                            for snip in issue["evidence_snippets"]:
+                                # Tag snippet with sections it belongs to
+                                snip_secs = find_involved_sections(snip)
+                                snip_secs_str = ", ".join(f"Section {s}" for s in snip_secs)
+                                issues_block_parts.append(f"  - [{snip_secs_str}]: \"{snip}\"")
+                        issues_block_parts.append("")
+                        
+                    issues_block = "\n".join(issues_block_parts)
+                    
+                    composer_user = (
+                        f"You are performing a final cross-section review of the section: {section.title}\n\n"
+                        f"[Prediction Requirement / Scenario]\n{self.simulation_requirement}\n\n"
+                        f"[Current Section Content]\n{section.content}\n\n"
+                        f"[Cross-Section Issues to Resolve]\n"
+                        f"Our automated validator detected the following contradictions/anomalies involving this section:\n\n"
+                        f"{issues_block}\n"
+                        f"[Instructions]\n"
+                        f"1. Revise the content to completely resolve the contradictions or numerical mismatches with other sections.\n"
+                        f"2. Ensure you keep the tone analytical, expert, and grounded. Do not introduce speculative claims unless calibrated.\n"
+                        f"3. Do NOT change parts of the text that are not involved in these issues.\n"
+                        f"4. Output ONLY the polished, revised section content. Do not include intro, outro, conversational fillers, or headings."
+                    )
+                    
+                    try:
+                        revised_content = self.composer_llm.chat(
+                            messages=[
+                                {"role": "system", "content": composer_system},
+                                {"role": "user", "content": composer_user},
+                            ],
+                            temperature=0.3,
+                            max_tokens=Config.LLM_CHAT_MAX_TOKENS,
+                        )
+                        if revised_content and revised_content.strip():
+                            cleaned = revised_content.strip()
+                            cleaned = re.sub(r'^#+\s+.*?\n', '', cleaned)
+                            section.content = cleaned.strip()
+                            logger.info(f"[Cross-Section] Successfully resolved cross-section consistency issues for '{section.title}'")
+                    except Exception as e:
+                        logger.error(f"[Cross-Section] Revision of '{section.title}' failed: {e}")
+
+            # Persist modified sections back to disk
+            modified_count = 0
+            modified_indices = []
+            for i, section in enumerate(outline.sections):
+                if section.content != original_contents[i]:
+                    section_num = i + 1
+                    try:
+                        ReportManager.save_section(report_id, section_num, section)
+                        modified_count += 1
+                        modified_indices.append(section_num)
+                        logger.info(f"[Cross-Section] Saved revised section {section_num:02d} ({section.title}) to disk.")
+                    except Exception as e:
+                        logger.error(f"[Cross-Section] Failed to save revised section {section_num:02d} ({section.title}) to disk: {e}")
+
+            if self.report_logger:
+                self.report_logger.log(
+                    action="cross_section_revision",
+                    stage="generating",
+                    details={
+                        "message": f"Pass {current_pass} complete. Revised and saved {modified_count} sections: {modified_indices}.",
+                        "modified_count": modified_count,
+                        "modified_indices": modified_indices,
+                        "pass": current_pass
+                    }
+                )
+                
+            # If no sections were modified in this pass, the loop has converged and we can stop.
+            if modified_count == 0:
+                logger.info(f"[Cross-Section] Loop converged after pass {current_pass} (no sections modified).")
+                break
+        else:
+            # We finished all passes and some issues might still remain. Log a warning.
+            logger.warning(f"[Cross-Section] Reached maximum passes ({MAX_PASSES}) without complete consistency resolution.")
+            if self.report_logger:
+                self.report_logger.log(
+                    action="cross_section_warning",
+                    stage="generating",
+                    details={
+                        "message": f"Warning: Bounded revalidation loop finished after {MAX_PASSES} passes with unresolved issues remaining.",
+                        "max_passes": MAX_PASSES
+                    }
+                )
     
     def plan_outline(
         self, 
@@ -4158,7 +4373,7 @@ class ReportAgent:
             )
             
             # Run cross-section pass before final assembly
-            self._run_cross_section_pass(outline)
+            self._run_cross_section_pass(report_id, outline)
             
             # Assemble complete report using ReportManager
             report.markdown_content = ReportManager.assemble_full_report(report_id, outline)

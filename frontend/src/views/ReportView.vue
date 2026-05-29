@@ -6,10 +6,7 @@
         <div class="brand" @click="router.push('/')">MIROFISH</div>
         <template v-if="projectData?.simulation_requirement">
           <div class="header-divider"></div>
-          <div class="header-query" :title="projectData.simulation_requirement">
-            <span class="query-label">Query:</span>
-            <span class="query-text">{{ projectData.simulation_requirement }}</span>
-          </div>
+          <HeaderQuery :text="projectData.simulation_requirement" />
         </template>
       </div>
       
@@ -76,6 +73,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step4Report from '../components/Step4Report.vue'
+import HeaderQuery from '../components/HeaderQuery.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation } from '../api/simulation'
 import { getReport } from '../api/report'
@@ -154,7 +152,14 @@ const loadReportData = async () => {
     addLog(t('log.loadReportData', { id: currentReportId.value }))
 
     // 获取 report 信息以获取 simulation_id
-    const reportRes = await getReport(currentReportId.value)
+    let reportRes = await getReport(currentReportId.value)
+    
+    // 如果报找不到报告，但我们知道它正在生成，可能是元数据还没写入
+    // 我们可以尝试轮询几次或者优雅降级
+    if (!reportRes.success && reportRes.error && reportRes.error.includes("not found")) {
+      addLog("Report not found on first load, maybe still initializing. Checking again...")
+    }
+
     if (reportRes.success && reportRes.data) {
       const reportData = reportRes.data
       simulationId.value = reportData.simulation_id
@@ -182,6 +187,25 @@ const loadReportData = async () => {
       }
     } else {
       addLog(t('log.getReportInfoFailed', { error: reportRes.error || t('common.unknownError') }))
+      
+      // Attempt to load from query param if available, as a fallback when report meta isn't loaded yet
+      if (!simulationId.value && route.query.simId) {
+        addLog("Fallback: using simulation ID from URL query: " + route.query.simId)
+        simulationId.value = route.query.simId
+        const simRes = await getSimulation(simulationId.value)
+        if (simRes.success && simRes.data) {
+          const simData = simRes.data
+          if (simData.project_id) {
+            const projRes = await getProject(simData.project_id)
+            if (projRes.success && projRes.data) {
+              projectData.value = projRes.data
+              if (projRes.data.graph_id) {
+                await loadGraph(projRes.data.graph_id)
+              }
+            }
+          }
+        }
+      }
     }
   } catch (err) {
     addLog(t('log.loadException', { error: err.message }))
@@ -266,37 +290,16 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  max-width: 35%;
-  overflow: hidden;
+  flex: 1;
+  max-width: calc(50% - 150px);
+  min-width: 0;
+  height: 100%;
 }
 
 .header-divider {
   width: 1px;
   height: 16px;
   background-color: #E0E0E0;
-}
-
-.header-query {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #666;
-}
-
-.query-label {
-  font-weight: 600;
-  color: #000;
-  flex-shrink: 0;
-}
-
-.query-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .view-switcher {

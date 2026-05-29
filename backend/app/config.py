@@ -25,6 +25,12 @@ def _normalize_vertex_genai_model(model: str | None) -> str:
     return m
 
 
+def is_vertex_gemini_chat_model(model: str | None) -> bool:
+    """True when the model id is a Gemini chat model (not OpenMaaS OSS ids like Qwen)."""
+    normalized = _normalize_vertex_genai_model(model)
+    return bool(normalized and normalized.lower().startswith('gemini-'))
+
+
 def _implicit_gemini_web_search_model(llm_model: str, vertex_enabled: bool) -> str:
     """
     Reuse LLM_MODEL_NAME only when it is clearly a Vertex Gemini model.

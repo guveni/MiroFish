@@ -6,10 +6,7 @@
         <div class="brand" @click="router.push('/')">MIROFISH</div>
         <template v-if="projectData?.simulation_requirement">
           <div class="header-divider"></div>
-          <div class="header-query" :title="projectData.simulation_requirement">
-            <span class="query-label">Query:</span>
-            <span class="query-text">{{ projectData.simulation_requirement }}</span>
-          </div>
+          <HeaderQuery :text="projectData.simulation_requirement" />
         </template>
       </div>
       
@@ -80,6 +77,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import GraphPanel from '../components/GraphPanel.vue'
 import Step3Simulation from '../components/Step3Simulation.vue'
+import HeaderQuery from '../components/HeaderQuery.vue'
 import { getProject, getGraphData } from '../api/graph'
 import { getSimulation, getSimulationConfig, stopSimulation, closeSimulationEnv, getEnvStatus } from '../api/simulation'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
@@ -364,37 +362,16 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
-  max-width: 35%;
-  overflow: hidden;
+  flex: 1;
+  max-width: calc(50% - 150px);
+  min-width: 0;
+  height: 100%;
 }
 
 .header-divider {
   width: 1px;
   height: 16px;
   background-color: #E0E0E0;
-}
-
-.header-query {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #666;
-}
-
-.query-label {
-  font-weight: 600;
-  color: #000;
-  flex-shrink: 0;
-}
-
-.query-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .view-switcher {

@@ -12,7 +12,11 @@ from ..config import Config
 from ..services import _backend
 from ..services.zep_entity_reader import ZepEntityReader
 from ..services.oasis_profile_generator import OasisProfileGenerator
-from ..services.simulation_manager import SimulationManager, SimulationStatus
+from ..services.simulation_manager import (
+    SimulationManager,
+    SimulationStatus,
+    SimulationCancelledError,
+)
 from ..services.simulation_runner import SimulationRunner, RunnerStatus
 from ..utils.logger import get_logger
 from ..utils.locale import t, get_locale, set_locale
@@ -601,7 +605,20 @@ def prepare_simulation():
                     result=result_state.to_simple_dict()
                 )
                 
+            except SimulationCancelledError:
+                logger.info(
+                    "Preparation cancelled for simulation %s (deleted or stopped)",
+                    simulation_id,
+                )
+                task_manager.fail_task(task_id, "Simulation deleted")
             except Exception as e:
+                if manager.is_cancelled(simulation_id):
+                    logger.info(
+                        "Preparation aborted for deleted simulation %s",
+                        simulation_id,
+                    )
+                    task_manager.fail_task(task_id, "Simulation deleted")
+                    return
                 logger.error(f"Failed to prepare simulation: {str(e)}")
                 task_manager.fail_task(task_id, str(e))
                 
@@ -775,6 +792,37 @@ def delete_simulation(simulation_id: str):
             }), 404
             
         delete_project = request.args.get('delete_project', 'false').lower() == 'true'
+
+        # Stop in-flight preparation and simulation runs before removing data.
+        SimulationManager.request_cancel(simulation_id)
+
+        from ..models.task import TaskManager, TaskStatus
+        task_manager = TaskManager()
+        for task in task_manager.list_tasks(task_type="simulation_prepare"):
+            if task.get("metadata", {}).get("simulation_id") != simulation_id:
+                continue
+            if task.get("status") in (
+                TaskStatus.PENDING.value,
+                TaskStatus.PROCESSING.value,
+            ):
+                task_manager.fail_task(task["task_id"], "Simulation deleted")
+
+        try:
+            run_state = SimulationRunner.get_run_state(simulation_id)
+            if run_state and run_state.runner_status in (
+                RunnerStatus.RUNNING,
+                RunnerStatus.PAUSED,
+                RunnerStatus.STARTING,
+            ):
+                SimulationRunner.stop_simulation(simulation_id)
+        except ValueError:
+            pass
+        except Exception as e:
+            logger.warning(
+                "Failed to stop simulation runner for %s: %s",
+                simulation_id,
+                e,
+            )
         
         # Delete simulation directory
         sim_dir = os.path.join(Config.OASIS_SIMULATION_DATA_DIR, simulation_id)

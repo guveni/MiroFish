@@ -123,6 +123,21 @@ def generate_report():
             if not report_id:
                 import uuid
                 report_id = f"report_{uuid.uuid4().hex[:12]}"
+                
+        # 同步初始化 Report 元数据，确保前端能够获取到
+        from datetime import datetime
+        initial_report = ReportManager.get_report(report_id)
+        if not initial_report:
+            from ..services.report_agent import Report, ReportStatus
+            initial_report = Report(
+                report_id=report_id,
+                simulation_id=simulation_id,
+                graph_id=graph_id,
+                simulation_requirement=simulation_requirement,
+                status=ReportStatus.PENDING,
+                created_at=datetime.now().isoformat()
+            )
+            ReportManager.save_report(initial_report)
         
         # 创建异步任务
         task_manager = TaskManager()
@@ -188,6 +203,17 @@ def generate_report():
             except Exception as e:
                 logger.error(f"报告生成失败: {str(e)}")
                 task_manager.fail_task(task_id, str(e))
+                # 确保报告状态被标记为失败，以便前端允许重新生成
+                try:
+                    failed_report = ReportManager.get_report(report_id)
+                    if failed_report and failed_report.status != ReportStatus.COMPLETED:
+                        from ..services.report_agent import ReportStatus
+                        failed_report.status = ReportStatus.FAILED
+                        failed_report.error = str(e)
+                        ReportManager.save_report(failed_report)
+                        ReportManager.update_progress(report_id, "failed", -1, str(e), completed_sections=[])
+                except Exception as save_ex:
+                    logger.error(f"Failed to update report status to FAILED: {save_ex}")
         
         # 启动后台线程
         thread = threading.Thread(target=run_generate, daemon=True)

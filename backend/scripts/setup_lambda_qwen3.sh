@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # connect to the instance
-#ssh -vv -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -N \
+# ssh -vv -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -N \
 #   -L 18000:127.0.0.1:8000 \
 #   -i "/Users/hgc/Documents/workspace/keys/guven-local.pem" \
-#   ubuntu@192.222.51.57
-#
+#   ubuntu@192.222.55.202
+# ssh -i "/Users/hgc/Documents/workspace/keys/guven-local.pem" ubuntu@192.222.55.202
+# scp -i "/Users/hgc/Documents/workspace/keys/guven-local.pem" backend/scripts/setup_lambda_qwen3.sh ubuntu@192.222.55.202:~/
 
 set -euo pipefail
 

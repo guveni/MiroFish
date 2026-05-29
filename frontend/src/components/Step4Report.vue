@@ -2077,9 +2077,13 @@ let consoleLogTimer = null
 
 const fetchAgentLog = async () => {
   if (!props.reportId) return
+  const currentReqReportId = props.reportId
   
   try {
-    const res = await getAgentLog(props.reportId, agentLogLine.value)
+    const res = await getAgentLog(currentReqReportId, agentLogLine.value)
+    
+    // Guard against stale response if reportId changed during in-flight request
+    if (currentReqReportId !== props.reportId) return
     
     if (res.success && res.data) {
       const newLogs = res.data.logs || []
@@ -2197,9 +2201,13 @@ const extractFinalContent = (response) => {
 
 const fetchConsoleLog = async () => {
   if (!props.reportId) return
+  const currentReqReportId = props.reportId
   
   try {
-    const res = await getConsoleLog(props.reportId, consoleLogLine.value)
+    const res = await getConsoleLog(currentReqReportId, consoleLogLine.value)
+    
+    // Guard against stale response if reportId changed during in-flight request
+    if (currentReqReportId !== props.reportId) return
     
     if (res.success && res.data) {
       const newLogs = res.data.logs || []
@@ -2272,7 +2280,7 @@ const recreateReport = async () => {
       emit('add-log', `Recreating report started: ${newReportId}`)
       
       // Navigate to the new report page
-      router.push({ name: 'Report', params: { reportId: newReportId } })
+      router.push({ name: 'Report', params: { reportId: newReportId }, query: { simId: props.simulationId } })
     } else {
       console.error('Failed to recreate report:', res.error)
       emit('add-log', `Recreation failed: ${res.error || 'Unknown error'}`)

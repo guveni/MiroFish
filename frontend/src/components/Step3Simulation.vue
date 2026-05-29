@@ -724,8 +724,8 @@ const handleNextStep = async () => {
       addLog(t('log.reportGenTaskStarted', { reportId }))
       
       markAdvanced('generateReport')
-      // Navigate to report page
-      router.push({ name: 'Report', params: { reportId } })
+      // Navigate to report page, pass simId as query fallback
+      router.push({ name: 'Report', params: { reportId }, query: { simId: props.simulationId } })
     } else {
       addLog(t('log.reportGenFailed', { error: res.error || t('common.unknownError') }))
       isGeneratingReport.value = false

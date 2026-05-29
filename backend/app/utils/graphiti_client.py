@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
-from ..config import Config
+from ..config import Config, is_vertex_gemini_chat_model
 from .logger import get_logger
 from .vertex_openai import effective_llm_api_key_or_vertex_token, effective_llm_base_url
 
@@ -236,10 +236,26 @@ def _resolve_openai_compat_llm_params() -> tuple[str, str | None, str]:
 
 
 def _build_local_embedder_clients() -> tuple[Any, Any, None]:
-    """Local HF embedder + OpenAI-compatible LLM (works for any provider)."""
+    """Local HF embedder + LLM (Vertex Gemini native or OpenAI-compatible)."""
     from .local_embedder import LocalHuggingFaceEmbedder
 
     local_emb = LocalHuggingFaceEmbedder(model_name=Config.GRAPHITI_LOCAL_EMBEDDING_MODEL)
+
+    if Config.LLM_PROVIDER == "vertex" and is_vertex_gemini_chat_model(Config.LLM_MODEL_NAME):
+        try:
+            llm, _, _ = _build_gemini_clients()
+            logger.info(
+                "Graphiti LLM: Vertex Gemini native client with local embedder (model=%s)",
+                Config.LLM_MODEL_NAME,
+            )
+            return llm, local_emb, None
+        except Exception as exc:
+            logger.warning(
+                "Vertex Gemini native Graphiti client unavailable, "
+                "falling back to OpenAI-compatible: %s",
+                exc,
+            )
+
     api_key, base_url, llm_model = _resolve_openai_compat_llm_params()
     llm = _create_graphiti_openai_llm(
         _graphiti_llm_config(api_key=api_key, base_url=base_url, model=llm_model)
@@ -264,7 +280,9 @@ def _build_clients() -> tuple[Any | None, Any | None, Any | None]:
     if provider == "ollama":
         return _build_openai_clients()
 
-    if provider == "vertex" or embedder == "vertex":
+    if (provider == "vertex" or embedder == "vertex") and is_vertex_gemini_chat_model(
+        Config.LLM_MODEL_NAME
+    ):
         try:
             return _build_gemini_clients()
         except Exception as exc:

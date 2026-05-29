@@ -656,3 +656,213 @@ def test_causal_completeness_flags_shallow_event_sentences():
     assert report.warning is not None
     assert "causal" in report.warning.lower() or "mechanism" in report.warning.lower()
 
+
+def test_cross_section_consistency_pass_persists_revisions(tmp_path, monkeypatch):
+    import os
+    from app.config import Config
+    from app.services.report_agent import ReportOutline, ReportSection, ReportManager
+    # Redirect Config.UPLOAD_FOLDER to a temporary directory so we don't pollute the real uploads folder
+    monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path))
+    monkeypatch.setattr(ReportManager, "REPORTS_DIR", os.path.join(str(tmp_path), "reports"))
+    
+    # Initialize report agent
+    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement")
+    
+    # Mock LLM and detector responses
+    class MockComposerLLM:
+        def chat(self, messages, temperature=0.3, max_tokens=None):
+            # When asked to revise, return a consistent response
+            return "Resolved: CompanyX stock price is stable at 35."
+            
+    agent.composer_llm = MockComposerLLM()
+    
+    # Mock contradiction detector to return a contradiction
+    class MockContradictionDetector:
+        def check(self, text):
+            from app.services.report_agent import ContradictionReport
+            # Return a detected contradiction to force a revision
+            return ContradictionReport(
+                contradictions=[("CompanyX", 1, 2, "Entity 'CompanyX' has conflicting price statements.")],
+                warning="Contradiction found",
+                summary="A contradiction found"
+            )
+            
+    agent._contradiction_detector = MockContradictionDetector()
+    
+    # Setup outline and sections
+    section1 = ReportSection(title="Section One", content="CompanyX stock is 12.")
+    section2 = ReportSection(title="Section Two", content="CompanyX stock is 35.")
+    outline = ReportOutline(
+        title="Consolidated Prediction Report",
+        summary="A test report.",
+        sections=[section1, section2]
+    )
+    
+    report_id = "test_report_cross_pass"
+    ReportManager._ensure_report_folder(report_id)
+    
+    # Save original sections to disk
+    ReportManager.save_section(report_id, 1, section1)
+    ReportManager.save_section(report_id, 2, section2)
+    
+    # Check that disk contents are initially original
+    sec1_path = os.path.join(tmp_path, "reports", report_id, "section_01.md")
+    
+    with open(sec1_path, "r", encoding="utf-8") as f:
+        assert "12" in f.read()
+        
+    # Run the cross-section pass
+    agent._run_cross_section_pass(report_id, outline)
+    
+    # Verify section1 has been updated in memory AND saved to disk!
+    assert section1.content == "Resolved: CompanyX stock price is stable at 35."
+    
+    with open(sec1_path, "r", encoding="utf-8") as f:
+        disk_content = f.read()
+        assert "Resolved: CompanyX stock price is stable at 35." in disk_content
+
+
+def test_cross_section_multipass_loop(tmp_path, monkeypatch):
+    import os
+    from app.config import Config
+    from app.services.report_agent import ReportOutline, ReportSection, ReportManager
+    
+    monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path))
+    monkeypatch.setattr(ReportManager, "REPORTS_DIR", os.path.join(str(tmp_path), "reports"))
+    
+    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement")
+    
+    # Mock LLM to return different things on successive calls or just trace call count
+    call_count = 0
+    class MockComposerLLM:
+        def chat(self, messages, temperature=0.3, max_tokens=None):
+            nonlocal call_count
+            call_count += 1
+            return f"Pass {call_count} resolved."
+            
+    agent.composer_llm = MockComposerLLM()
+    
+    # Mock detector to always find a contradiction so we force maximum passes (2)
+    class MockContradictionDetector:
+        def check(self, text):
+            from app.services.report_agent import ContradictionReport
+            # Find whatever is in the draft to mock a contradiction between whatever is currently there
+            # Since sections are separated by \n\n, let's parse them
+            sentences = [s.strip() for s in text.split("\n\n") if s.strip()]
+            sent_1 = sentences[0] if len(sentences) > 0 else "CompanyX stock is 12."
+            sent_2 = sentences[1] if len(sentences) > 1 else "CompanyX stock is 35."
+            return ContradictionReport(
+                contradictions=[("CompanyX", 1, 2, "Entity 'CompanyX' has conflicting price statements.")],
+                warning="Contradiction found",
+                summary="A contradiction found",
+                detailed_contradictions=[{
+                    "entity": "CompanyX",
+                    "src_1": 1,
+                    "src_2": 2,
+                    "reason": "Entity 'CompanyX' has conflicting price statements.",
+                    "sent_1": sent_1,
+                    "sent_2": sent_2
+                }]
+            )
+            
+    agent._contradiction_detector = MockContradictionDetector()
+    
+    section1 = ReportSection(title="Section One", content="CompanyX stock is 12.")
+    section2 = ReportSection(title="Section Two", content="CompanyX stock is 35.")
+    outline = ReportOutline(
+        title="Consolidated Prediction Report",
+        summary="A test report.",
+        sections=[section1, section2]
+    )
+    
+    report_id = "test_report_multipass"
+    ReportManager._ensure_report_folder(report_id)
+    ReportManager.save_section(report_id, 1, section1)
+    ReportManager.save_section(report_id, 2, section2)
+    
+    # Run cross section pass
+    agent._run_cross_section_pass(report_id, outline)
+    
+    # Verify that we hit both passes (each pass calls composer for the sections that are involved/unresolved)
+    # Since we have 2 sections, and on each pass we find contradiction, we revise both sections, calling chat twice per pass.
+    # Total chat calls across 2 passes is 4 calls.
+    assert call_count == 4
+
+
+def test_structured_issue_matching(tmp_path, monkeypatch):
+    import os
+    from app.config import Config
+    from app.services.report_agent import ReportOutline, ReportSection, ReportManager
+    
+    monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path))
+    monkeypatch.setattr(ReportManager, "REPORTS_DIR", os.path.join(str(tmp_path), "reports"))
+    
+    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement")
+    
+    # Setup sections where some share similar numbers but only specific ones are involved
+    # E.g. section 1 and 2 are in contradiction, but section 3 contains the same numbers but is unrelated
+    section1 = ReportSection(title="Section One", content="CompanyX stock is 12. Also, there are 35 employees.")
+    section2 = ReportSection(title="Section Two", content="CompanyX stock is 35. Also, there are 12 competitors.")
+    section3 = ReportSection(title="Section Three", content="This is an unrelated section with 12 and 35, but no CompanyX.")
+    
+    outline = ReportOutline(
+        title="Consolidated Prediction Report",
+        summary="A test report.",
+        sections=[section1, section2, section3]
+    )
+    
+    report_id = "test_report_structured_match"
+    ReportManager._ensure_report_folder(report_id)
+    ReportManager.save_section(report_id, 1, section1)
+    ReportManager.save_section(report_id, 2, section2)
+    ReportManager.save_section(report_id, 3, section3)
+    
+    # Mock LLM to track which sections get revised
+    revised_sections = []
+    class MockComposerLLM:
+        def chat(self, messages, temperature=0.3, max_tokens=None):
+            # Extract section title from messages to see which section is being revised
+            user_msg = messages[1]["content"] if len(messages) > 1 else ""
+            if "Section One" in user_msg:
+                revised_sections.append(1)
+            elif "Section Two" in user_msg:
+                revised_sections.append(2)
+            elif "Section Three" in user_msg:
+                revised_sections.append(3)
+            return "Resolved."
+            
+    agent.composer_llm = MockComposerLLM()
+    
+    # Contradiction on CompanyX between sentence 1 (section 1) and sentence 2 (section 2)
+    class MockContradictionDetector:
+        def check(self, text):
+            from app.services.report_agent import ContradictionReport
+            if "Resolved" in text:
+                return ContradictionReport(contradictions=[], warning=None, summary="No contradictions")
+            return ContradictionReport(
+                contradictions=[("CompanyX", 1, 2, "Entity 'CompanyX' has conflicting price statements.")],
+                warning="Contradiction found",
+                summary="A contradiction found",
+                detailed_contradictions=[{
+                    "entity": "CompanyX",
+                    "src_1": 1,
+                    "src_2": 2,
+                    "reason": "Entity 'CompanyX' has conflicting price statements.",
+                    "sent_1": "CompanyX stock is 12.",
+                    "sent_2": "CompanyX stock is 35."
+                }]
+            )
+            
+    agent._contradiction_detector = MockContradictionDetector()
+    
+    agent._run_cross_section_pass(report_id, outline)
+    
+    # Section 1 and Section 2 must be revised because they contain the conflicting sentences.
+    # Section 3 should NOT be revised even though it contains "12" and "35", because the structured
+    # matching matched the sentences to Section 1 and 2 perfectly!
+    assert 1 in revised_sections
+    assert 2 in revised_sections
+    assert 3 not in revised_sections
+
+
+

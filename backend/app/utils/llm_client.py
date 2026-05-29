@@ -77,7 +77,7 @@ def _repair_root_object_trailing_garbage(text: str) -> Optional[str]:
                 escape = True
             elif ch == '"':
                 in_string = False
-                if brace_depth == 1 and bracket_depth == 0:
+                if last_root_value_end < 0 and brace_depth == 1 and bracket_depth == 0:
                     j = i + 1
                     while j < n and text[j] in ' \t\r\n':
                         j += 1
@@ -92,6 +92,8 @@ def _repair_root_object_trailing_garbage(text: str) -> Optional[str]:
             brace_depth += 1
         elif ch == '}':
             brace_depth -= 1
+            if brace_depth == 0 and bracket_depth == 0 and last_root_value_end < 0:
+                return text[:i+1]
         elif ch == '[':
             bracket_depth += 1
         elif ch == ']':

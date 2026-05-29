@@ -9,9 +9,10 @@ Improvements:
 """
 
 import json
+import os
 import random
 import time
-from typing import Dict, Any, List, Optional
+from typing import Callable, Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -23,6 +24,13 @@ from .zep_entity_reader import EntityNode, ZepEntityReader
 from .zep_tools import ZepToolsService
 
 logger = get_logger('mirofish.oasis_profile')
+
+
+def _ensure_output_parent_dir(file_path: str) -> None:
+    """Create parent directories for a profile output file if needed."""
+    parent = os.path.dirname(os.path.abspath(file_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
 
 
 @dataclass
@@ -990,6 +998,11 @@ Important:
                 "interested_topics": ["General", "Social Issues"],
             }
 
+    def _abort_if_cancelled(self, cancel_check: Optional[Callable[[], bool]]) -> None:
+        if cancel_check and cancel_check():
+            from .simulation_manager import SimulationCancelledError
+            raise SimulationCancelledError("Simulation preparation was cancelled")
+
     async def _generate_profiles_from_entities_async(
         self,
         entities: List[EntityNode],
@@ -999,6 +1012,7 @@ Important:
         realtime_output_path: Optional[str],
         output_platform: str,
         current_locale: str,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> List[OasisAgentProfile]:
         """Generate profiles with bounded async LLM concurrency."""
         import asyncio
@@ -1020,6 +1034,7 @@ Important:
                     return
 
                 try:
+                    _ensure_output_parent_dir(realtime_output_path)
                     if output_platform == "reddit":
                         profiles_data = [p.to_reddit_format() for p in existing_profiles]
                         with open(realtime_output_path, 'w', encoding='utf-8') as f:
@@ -1075,6 +1090,10 @@ Important:
         ]
 
         for task in asyncio.as_completed(tasks):
+            if cancel_check and cancel_check():
+                for pending in tasks:
+                    pending.cancel()
+                self._abort_if_cancelled(cancel_check)
             result_idx, profile, error = await task
             entity = entities[result_idx]
             entity_type = entity.get_entity_type() or "Entity"
@@ -1109,7 +1128,8 @@ Important:
         graph_id: Optional[str] = None,
         parallel_count: int = 5,
         realtime_output_path: Optional[str] = None,
-        output_platform: str = "reddit"
+        output_platform: str = "reddit",
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> List[OasisAgentProfile]:
         """
         Generate Agent Profiles from entities in parallel.
@@ -1151,6 +1171,7 @@ Important:
                     return
                 
                 try:
+                    _ensure_output_parent_dir(realtime_output_path)
                     if output_platform == "reddit":
                         # Reddit JSON format.
                         profiles_data = [p.to_reddit_format() for p in existing_profiles]
@@ -1187,6 +1208,7 @@ Important:
                         realtime_output_path=realtime_output_path,
                         output_platform=output_platform,
                         current_locale=current_locale,
+                        cancel_check=cancel_check,
                     )
                 )
 
@@ -1236,6 +1258,9 @@ Important:
             
             # Collect results.
             for future in concurrent.futures.as_completed(future_to_entity):
+                if cancel_check and cancel_check():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    self._abort_if_cancelled(cancel_check)
                 idx, entity = future_to_entity[future]
                 entity_type = entity.get_entity_type() or "Entity"
                 
@@ -1358,6 +1383,8 @@ Important:
         # Ensure the file extension is .csv.
         if not file_path.endswith('.csv'):
             file_path = file_path.replace('.json', '.csv')
+
+        _ensure_output_parent_dir(file_path)
         
         with open(file_path, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -1457,6 +1484,8 @@ Important:
                 item["interested_topics"] = profile.interested_topics
             
             data.append(item)
+
+        _ensure_output_parent_dir(file_path)
         
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

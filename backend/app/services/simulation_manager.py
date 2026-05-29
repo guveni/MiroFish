@@ -7,6 +7,7 @@ LLM-generated configuration parameters.
 import os
 import json
 import shutil
+import threading
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -32,6 +33,10 @@ from .simulation_config_generator import (
 from ..utils.locale import t
 
 logger = get_logger('mirofish.simulation')
+
+
+class SimulationCancelledError(Exception):
+    """Raised when a simulation is deleted while work is still in progress."""
 
 
 class SimulationStatus(str, Enum):
@@ -140,6 +145,9 @@ class SimulationManager:
         os.path.dirname(__file__), 
         '../../uploads/simulations'
     )
+
+    _cancelled_simulations: set[str] = set()
+    _cancel_lock = threading.Lock()
     
     def __init__(self):
         # Ensure the directory exists.
@@ -147,6 +155,28 @@ class SimulationManager:
         
         # In-memory simulation state cache.
         self._simulations: Dict[str, SimulationState] = {}
+
+    @classmethod
+    def request_cancel(cls, simulation_id: str) -> None:
+        """Mark a simulation as cancelled (e.g. user deleted it while preparing)."""
+        with cls._cancel_lock:
+            cls._cancelled_simulations.add(simulation_id)
+
+    @classmethod
+    def clear_cancel(cls, simulation_id: str) -> None:
+        with cls._cancel_lock:
+            cls._cancelled_simulations.discard(simulation_id)
+
+    @classmethod
+    def is_cancelled(cls, simulation_id: str) -> bool:
+        with cls._cancel_lock:
+            return simulation_id in cls._cancelled_simulations
+
+    def _raise_if_cancelled(self, simulation_id: str) -> None:
+        if self.is_cancelled(simulation_id):
+            raise SimulationCancelledError(
+                f"Simulation {simulation_id} was deleted or cancelled"
+            )
     
     def _get_simulation_dir(self, simulation_id: str) -> str:
         """Return the simulation data directory."""
@@ -348,6 +378,8 @@ class SimulationManager:
         state = self._load_simulation_state(simulation_id)
         if not state:
             raise ValueError(f"Simulation does not exist: {simulation_id}")
+
+        self._raise_if_cancelled(simulation_id)
         
         try:
             state.status = SimulationStatus.PREPARING
@@ -399,6 +431,8 @@ class SimulationManager:
                     current=filtered.filtered_count,
                     total=filtered.filtered_count
                 )
+
+            self._raise_if_cancelled(simulation_id)
             
             if filtered.filtered_count == 0:
                 state.status = SimulationStatus.FAILED
@@ -486,7 +520,10 @@ class SimulationManager:
                     parallel_count=parallel_profile_count,
                     realtime_output_path=realtime_output_path,
                     output_platform=realtime_platform,
+                    cancel_check=lambda: self.is_cancelled(simulation_id),
                 )
+
+            self._raise_if_cancelled(simulation_id)
             
             state.profiles_count = len(profiles)
             
@@ -538,6 +575,8 @@ class SimulationManager:
                 )
             except Exception as cp_err:
                 logger.warning("checkpoint simulation_profiles_written skipped: %s", cp_err)
+
+            self._raise_if_cancelled(simulation_id)
             
             # Stage 3: generate simulation configuration with the LLM.
             if progress_callback:
@@ -655,10 +694,21 @@ class SimulationManager:
                 state.entities_count,
                 state.profiles_count,
             )
+
+            self.clear_cancel(simulation_id)
             
             return state
+
+        except SimulationCancelledError:
+            logger.info("Simulation preparation cancelled: %s", simulation_id)
+            raise
             
         except Exception as e:
+            if self.is_cancelled(simulation_id):
+                logger.info("Simulation preparation aborted after delete: %s", simulation_id)
+                raise SimulationCancelledError(
+                    f"Simulation {simulation_id} was deleted or cancelled"
+                ) from e
             logger.error("Simulation preparation failed: %s, error=%s", simulation_id, str(e))
             import traceback
             logger.error(traceback.format_exc())
