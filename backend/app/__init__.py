@@ -1,80 +1,180 @@
 """
-MiroFish Backend - Flask应用工厂
+MiroFish Backend - FastAPI Application Factory
 """
 
 import os
 import warnings
 
-# 抑制 multiprocessing resource_tracker 的警告（来自第三方库如 transformers）
-# 需要在所有其他导入之前设置
+# Suppress multiprocessing resource_tracker warnings
 warnings.filterwarnings("ignore", message=".*resource_tracker.*")
 
-from flask import Flask, request
-from flask_cors import CORS
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
 
 from .config import Config
 from .utils.logger import setup_logger, get_logger
 
 
-def create_app(config_class=Config):
-    """Flask应用工厂函数"""
-    app = Flask(__name__)
-    app.config.from_object(config_class)
+def create_app() -> FastAPI:
+    """FastAPI application factory function."""
+    app = FastAPI(title="MiroFish API", version="0.1.0")
     
-    # 设置JSON编码：确保中文直接显示（而不是 \uXXXX 格式）
-    # Flask >= 2.3 使用 app.json.ensure_ascii，旧版本使用 JSON_AS_ASCII 配置
-    if hasattr(app, 'json') and hasattr(app.json, 'ensure_ascii'):
-        app.json.ensure_ascii = False
+    # Initialize database
+    from .database import db
+    db.init_app(Config.SQLALCHEMY_DATABASE_URI)
     
-    # 设置日志
+    # Import models to register and automatically create tables
+    from .models.user import User
+    from .models.project import Project
+    from .models.task import Task
+    db.create_all()
+    
+    # Setup logger
     logger = setup_logger('mirofish')
     
-    # 只在 reloader 子进程中打印启动信息（避免 debug 模式下打印两次）
-    is_reloader_process = os.environ.get('WERKZEUG_RUN_MAIN') == 'true'
-    debug_mode = app.config.get('DEBUG', False)
-    should_log_startup = not debug_mode or is_reloader_process
+    # Print startup message
+    logger.info("=" * 50)
+    logger.info("MiroFish Backend (FastAPI) Starting...")
+    logger.info("=" * 50)
     
-    if should_log_startup:
-        logger.info("=" * 50)
-        logger.info("MiroFish Backend 启动中...")
-        logger.info("=" * 50)
+    # Enable CORS
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     
-    # 启用CORS
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
-    
-    # 注册模拟进程清理函数（确保服务器关闭时终止所有模拟进程）
+    # Register simulation clean-up on server shutdown
     from .services.simulation_runner import SimulationRunner
     SimulationRunner.register_cleanup()
-    if should_log_startup:
-        logger.info("已注册模拟进程清理函数")
+    logger.info("Registered simulation cleanup callback.")
     
-    # 请求日志中间件
-    @app.before_request
-    def log_request():
-        logger = get_logger('mirofish.request')
-        logger.debug(f"请求: {request.method} {request.path}")
-        if request.content_type and 'json' in request.content_type:
-            logger.debug(f"请求体: {request.get_json(silent=True)}")
+    # Request logging and context middleware
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        req_logger = get_logger('mirofish.request')
+        req_logger.debug(f"Request: {request.method} {request.url.path}")
+        
+        from .utils.locale import request_var
+        token = request_var.set(request)
+        try:
+            response = await call_next(request)
+            req_logger.debug(f"Response: {response.status_code}")
+            return response
+        finally:
+            request_var.reset(token)
     
-    @app.after_request
-    def log_response(response):
-        logger = get_logger('mirofish.request')
-        logger.debug(f"响应: {response.status_code}")
-        return response
+    # DB session cleanup middleware to prevent connection leaks
+    @app.middleware("http")
+    async def db_session_cleanup(request: Request, call_next):
+        try:
+            response = await call_next(request)
+            return response
+        finally:
+            from .database import db
+            db.session.remove()
+            
+    # Centralized global exception handlers
+    import traceback
+    from fastapi.exceptions import RequestValidationError
     
-    # 注册蓝图
-    from .api import graph_bp, simulation_bp, report_bp
-    app.register_blueprint(graph_bp, url_prefix='/api/graph')
-    app.register_blueprint(simulation_bp, url_prefix='/api/simulation')
-    app.register_blueprint(report_bp, url_prefix='/api/report')
+    @app.exception_handler(HTTPException)
+    async def http_exception_handler(request: Request, exc: HTTPException):
+        if request.url.path.startswith("/api/"):
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "success": False,
+                    "error": exc.detail
+                }
+            )
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail}
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError):
+        def _json_safe(value):
+            if isinstance(value, bytes):
+                return value.decode("utf-8", errors="replace")
+            if isinstance(value, dict):
+                return {k: _json_safe(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [_json_safe(v) for v in value]
+            return value
+
+        errors_list = []
+        for error in exc.errors():
+            loc = " -> ".join(str(x) for x in error.get("loc", []))
+            msg = error.get("msg", "Validation error")
+            errors_list.append(f"{loc}: {msg}")
+        error_msg = "; ".join(errors_list)
+        return JSONResponse(
+            status_code=422,
+            content={
+                "success": False,
+                "error": error_msg,
+                "details": _json_safe(exc.errors())
+            }
+        )
+
+    @app.exception_handler(Exception)
+    async def global_exception_handler(request: Request, exc: Exception):
+        logger.exception("Global exception handler caught: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(exc),
+                "traceback": traceback.format_exc()
+            }
+        )
     
-    # 健康检查
-    @app.route('/health')
+    # Register API routers
+    from .api import graph_router, simulation_router, report_router
+    app.include_router(graph_router, prefix="/api/graph")
+    app.include_router(simulation_router, prefix="/api/simulation")
+    app.include_router(report_router, prefix="/api/report")
+    
+    # Register Inngest FastAPI adapter
+    import inngest.fast_api
+    from .inngest_client import inngest_client
+    from .tasks.inngest_tasks import generate_ontology_task, build_graph_task, generate_report_task, run_simulation_task
+    inngest.fast_api.serve(
+        app,
+        inngest_client,
+        [generate_ontology_task, build_graph_task, generate_report_task, run_simulation_task]
+    )
+    
+    # Health check
+    @app.get("/health")
     def health():
         return {'status': 'ok', 'service': 'MiroFish Backend'}
-    
-    if should_log_startup:
-        logger.info("MiroFish Backend 启动完成")
-    
+        
+    # Serve unified Vue 3 static assets if compiled dist exists
+    frontend_dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../frontend/dist"))
+    if os.path.exists(frontend_dist_dir):
+        assets_dir = os.path.join(frontend_dist_dir, "assets")
+        if os.path.exists(assets_dir):
+            app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+            logger.info(f"Mounted Vue 3 static assets from {assets_dir}")
+            
+        # Catch-all route to serve the single page app (SPA) HTML5 history
+        @app.get("/{catchall:path}")
+        async def serve_spa(catchall: str):
+            if catchall.startswith("api/") or catchall.startswith("health") or catchall.startswith("assets/"):
+                return JSONResponse(status_code=404, content={"detail": "Not found"})
+            index_path = os.path.join(frontend_dist_dir, "index.html")
+            if os.path.exists(index_path):
+                return FileResponse(index_path)
+            return JSONResponse(status_code=404, content={"detail": "Index file not found"})
+    else:
+        logger.info("Vue 3 frontend dist folder not found. Unified static serving disabled (development mode).")
+        
+    logger.info("MiroFish Backend (FastAPI) Initialization Complete.")
     return app
-

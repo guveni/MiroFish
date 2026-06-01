@@ -1,9 +1,14 @@
 <template>
   <div class="home-container">
-    <!-- 顶部导航栏 -->
+    <!-- Top Navigation Bar -->
     <nav class="navbar">
       <div class="nav-brand">MIROFISH</div>
       <div class="nav-links">
+        <div v-if="currentUser" class="user-profile">
+          <span class="user-avatar">👤</span>
+          <span class="user-name">{{ currentUser.name }}</span>
+          <button @click="handleLogout" class="logout-btn">Log out</button>
+        </div>
         <LanguageSwitcher />
         <a href="https://github.com/666ghj/MiroFish" target="_blank" class="github-link">
           {{ $t('nav.visitGithub') }} <span class="arrow">↗</span>
@@ -298,20 +303,34 @@
         </div>
       </section>
 
-      <!-- 历史项目数据库 -->
+      <!-- Historical Project Database -->
       <HistoryDatabase />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import HistoryDatabase from '../components/HistoryDatabase.vue'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 import { setPendingUpload } from '../store/pendingUpload.js'
 
 const router = useRouter()
+const currentUser = ref(null)
+
+onMounted(() => {
+  const userStr = localStorage.getItem('mirofish_user')
+  if (userStr) {
+    currentUser.value = JSON.parse(userStr)
+  }
+})
+
+const handleLogout = () => {
+  localStorage.removeItem('mirofish_token')
+  localStorage.removeItem('mirofish_user')
+  window.location.href = '/login'
+}
 
 // 表单数据
 const formData = ref({
@@ -456,7 +475,7 @@ const startSimulation = () => {
   color: var(--black);
 }
 
-/* 顶部导航 */
+/* Top Navigation */
 .navbar {
   height: 60px;
   background: var(--black);
@@ -465,6 +484,45 @@ const startSimulation = () => {
   justify-content: space-between;
   align-items: center;
   padding: 0 40px;
+}
+
+.user-profile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background-color: #1a1f26;
+  border: 1px solid #2d3643;
+  padding: 6px 12px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+}
+
+.user-avatar {
+  font-size: 1rem;
+}
+
+.user-name {
+  font-weight: 500;
+  color: #ef6820;
+}
+
+.logout-btn {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  margin-left: 4px;
+  border-left: 1px solid #2d3643;
+  padding-left: 10px;
+}
+
+.logout-btn:hover {
+  color: #ef6820;
 }
 
 .nav-brand {

@@ -1,22 +1,18 @@
-"""Provider-neutral LLM client."""
+"""Provider-neutral LLM client powered by LangChain."""
 
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, cast
-from openai import AsyncAzureOpenAI, AsyncOpenAI, AzureOpenAI, OpenAI
+import time
+from typing import Any, Dict, List, Optional
+
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_openai import ChatOpenAI, AzureChatOpenAI
 
 from ..config import Config
-from .openai_tracing import wrap_openai_client
 from .pipeline_retry import run_pipeline_step, run_pipeline_step_async
 
 logger = logging.getLogger(__name__)
-from .vertex_openai import (
-    effective_llm_api_key_or_vertex_token,
-    effective_llm_base_url,
-    is_vertex_ai_enabled,
-    vertex_config_present,
-)
 
 
 def _strip_markdown_json_fences(text: str) -> str:
@@ -135,7 +131,7 @@ def parse_llm_json_response(text: str) -> Dict[str, Any]:
 
 
 class LLMClient:
-    """Small OpenAI-compatible facade for OpenAI, Azure OpenAI, Vertex, Ollama, and Lambda."""
+    """LangChain-powered facade for OpenAI, Azure OpenAI, Vertex, Ollama, and Lambda."""
     
     @classmethod
     def for_composer(cls) -> "LLMClient":
@@ -157,147 +153,91 @@ class LLMClient:
         provider: Optional[str] = None
     ):
         self.provider = (provider or Config.LLM_PROVIDER or "openai").strip().lower()
-        if provider:
-            self._vertex = self.provider == "vertex"
-        else:
-            self._vertex = self.provider == "vertex" or is_vertex_ai_enabled()
+        self._vertex = self.provider == "vertex"
         self._azure = self.provider == "azure"
         self._ollama = self.provider == "ollama"
         self._lambda = self.provider == "lambda"
 
-        if self._ollama:
-            resolved_base = base_url or Config.OLLAMA_BASE_URL
-        elif self._lambda:
-            resolved_base = base_url or Config.LAMBDA_BASE_URL
-        elif self._vertex:
-            if base_url:
-                resolved_base = base_url
-            else:
-                import os
-                composer_project = os.environ.get("COMPOSER_LLM_VERTEX_PROJECT_ID") or (Config.COMPOSER_LLM_VERTEX_PROJECT_ID if hasattr(Config, "COMPOSER_LLM_VERTEX_PROJECT_ID") else None)
-                composer_location = os.environ.get("COMPOSER_LLM_VERTEX_LOCATION") or (Config.COMPOSER_LLM_VERTEX_LOCATION if hasattr(Config, "COMPOSER_LLM_VERTEX_LOCATION") else None)
-                
-                project = composer_project or os.environ.get("VERTEX_AI_PROJECT_ID") or os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
-                location = composer_location or os.environ.get("VERTEX_AI_LOCATION") or ""
-                
-                if project and location:
-                    loc = location.lower().strip()
-                    api_version = os.environ.get("VERTEX_AI_OPENAI_API_VERSION", "v1").strip().lstrip("/")
-                    if api_version not in ("v1", "v1beta1"):
-                        api_version = "v1"
-                    if loc == "global":
-                        resolved_base = f"https://aiplatform.googleapis.com/{api_version}/projects/{project}/locations/global/endpoints/openapi"
-                    else:
-                        resolved_base = f"https://{loc}-aiplatform.googleapis.com/{api_version}/projects/{project}/locations/{loc}/endpoints/openapi"
-                else:
-                    resolved_base = effective_llm_base_url()
-        elif self._azure:
-            resolved_base = base_url or None
-        else:
-            resolved_base = base_url or Config.LLM_BASE_URL
-        self.base_url = resolved_base
-
-        self.model = model or (
-            (Config.COMPOSER_LLM_MODEL_NAME if self.provider == Config.COMPOSER_LLM_PROVIDER and hasattr(Config, "COMPOSER_LLM_MODEL_NAME") and Config.COMPOSER_LLM_MODEL_NAME else (Config.AZURE_OPENAI_DEPLOYMENT if self._azure else Config.require_llm_model_name()))
-        )
+        self.model = model or (Config.AZURE_OPENAI_DEPLOYMENT if self._azure else Config.require_llm_model_name())
         self.api_key = api_key
 
         if self.provider not in ("openai", "azure", "vertex", "ollama", "lambda"):
             raise ValueError(f"LLM provider {self.provider} must be one of: openai, azure, vertex, ollama, lambda")
 
-        self.client = None
-        self.async_client = None
+        # Resolve base URL
+        if self._ollama:
+            self.base_url = base_url or Config.OLLAMA_BASE_URL
+        elif self._lambda:
+            self.base_url = base_url or Config.LAMBDA_BASE_URL
+        else:
+            self.base_url = base_url or Config.LLM_BASE_URL
 
+        # Instantiate the correct LangChain Chat Model
         if self._azure:
             endpoint = base_url or (Config.COMPOSER_LLM_BASE_URL if hasattr(Config, "COMPOSER_LLM_BASE_URL") and Config.COMPOSER_LLM_BASE_URL else Config.AZURE_OPENAI_ENDPOINT)
             key = api_key or (Config.COMPOSER_LLM_API_KEY if hasattr(Config, "COMPOSER_LLM_API_KEY") and Config.COMPOSER_LLM_API_KEY else Config.AZURE_OPENAI_API_KEY)
             deployment = self.model
             
             if not endpoint:
-                raise ValueError("AZURE_OPENAI_ENDPOINT or COMPOSER_LLM_BASE_URL is not configured")
+                raise ValueError("AZURE_OPENAI_ENDPOINT is not configured")
             if not key:
-                raise ValueError("AZURE_OPENAI_API_KEY or COMPOSER_LLM_API_KEY is not configured")
+                raise ValueError("AZURE_OPENAI_API_KEY is not configured")
             if not deployment:
-                raise ValueError("AZURE_OPENAI_DEPLOYMENT or COMPOSER_LLM_MODEL_NAME is not configured")
+                raise ValueError("AZURE_OPENAI_DEPLOYMENT is not configured")
 
-            self.client = wrap_openai_client(
-                AzureOpenAI(
-                    api_key=key,
-                    azure_endpoint=endpoint,
-                    api_version=Config.AZURE_OPENAI_API_VERSION,
-                ),
-                model=deployment,
+            self._model = AzureChatOpenAI(
+                openai_api_key=key,
+                azure_endpoint=endpoint,
+                api_version=Config.AZURE_OPENAI_API_VERSION,
+                azure_deployment=deployment,
             )
-            self.async_client = cast(
-                AsyncAzureOpenAI,
-                wrap_openai_client(
-                    AsyncAzureOpenAI(
-                        api_key=key,
-                        azure_endpoint=endpoint,
-                        api_version=Config.AZURE_OPENAI_API_VERSION,
-                    ),
-                    model=deployment,
-                ),
+        elif self._ollama:
+            self._model = ChatOpenAI(
+                openai_api_key="ollama",
+                base_url=self.base_url,
+                model_name=self.model,
             )
-        elif self._ollama or self._lambda or not self._vertex:
+        elif self._vertex:
+            from .vertex_openai import effective_llm_base_url, effective_llm_api_key_or_vertex_token
+            base_url = effective_llm_base_url()
+            api_key = effective_llm_api_key_or_vertex_token(self.api_key)
+            self._model = ChatOpenAI(
+                openai_api_key=api_key,
+                base_url=base_url,
+                model_name=self.model,
+            )
+        else:
+            # OpenAI or Lambda (which is OpenAI compatible)
             key = self.api_key or (
                 Config.COMPOSER_LLM_API_KEY
-                if hasattr(Config, "COMPOSER_LLM_API_KEY")
-                and Config.COMPOSER_LLM_API_KEY
-                and provider
-                else (
-                    "ollama"
-                    if self._ollama
-                    else (Config.LAMBDA_API_KEY if self._lambda else Config.LLM_API_KEY)
-                )
+                if hasattr(Config, "COMPOSER_LLM_API_KEY") and Config.COMPOSER_LLM_API_KEY and provider
+                else (Config.LAMBDA_API_KEY if self._lambda else Config.LLM_API_KEY)
             )
 
             if self.provider == "openai" and not key:
                 raise ValueError("LLM_API_KEY or COMPOSER_LLM_API_KEY is not configured")
             if self.provider == "lambda" and not key:
-                raise ValueError(
-                    "LAMBDA_API_KEY, LLM_API_KEY, or COMPOSER_LLM_API_KEY is not configured"
-                )
+                raise ValueError("LAMBDA_API_KEY is not configured")
                 
-            self.client = wrap_openai_client(
-                OpenAI(api_key=key or "ollama", base_url=self.base_url),
-                model=self.model,
-            )
-            self.async_client = cast(
-                AsyncOpenAI,
-                wrap_openai_client(
-                    AsyncOpenAI(
-                        api_key=key or "ollama", base_url=self.base_url,
-                    ),
-                    model=self.model,
-                ),
+            self._model = ChatOpenAI(
+                openai_api_key=key,
+                base_url=self.base_url,
+                model_name=self.model,
             )
 
-    def _active_client(self) -> OpenAI:
-        if self._vertex:
-            from .vertex_openai import get_vertex_access_token
-            key = get_vertex_access_token()
-            return wrap_openai_client(
-                OpenAI(api_key=key, base_url=self.base_url),
-                model=self.model,
-            )
-        assert self.client is not None
-        return self.client
+    def _convert_messages(self, messages: List[Dict[str, str]]) -> List[Any]:
+        lc_messages = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                lc_messages.append(SystemMessage(content=content))
+            elif role == "assistant":
+                lc_messages.append(AIMessage(content=content))
+            else:
+                lc_messages.append(HumanMessage(content=content))
+        return lc_messages
 
-    def _active_async_client(self) -> AsyncOpenAI:
-        if self._vertex:
-            from .vertex_openai import get_vertex_access_token
-            key = get_vertex_access_token()
-            return cast(
-                AsyncOpenAI,
-                wrap_openai_client(
-                    AsyncOpenAI(api_key=key, base_url=self.base_url),
-                    model=self.model,
-                ),
-            )
-        assert self.async_client is not None
-        return self.async_client
-    
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -305,26 +245,44 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         response_format: Optional[Dict] = None
     ) -> str:
-        """Send a chat completion request and return text content."""
-        import time
+        """Send a chat completion request and return text content using LangChain."""
         actual_max_tokens = max_tokens if max_tokens is not None else Config.LLM_CHAT_MAX_TOKENS
-        kwargs = {
+        
+        # Check global LLM Cache
+        from .llm_cache import LLMCache
+        cache = LLMCache.get_instance()
+        params = {
+            "temperature": temperature,
+            "max_tokens": actual_max_tokens,
+            "response_format": response_format,
+            "provider": self.provider,
             "model": self.model,
-            "messages": messages,
+        }
+        cached_response = cache.get(messages, params)
+        if cached_response is not None:
+            return cached_response
+
+        lc_messages = self._convert_messages(messages)
+        
+        # Build bound model with dynamic invocation parameters
+        kwargs = {
             "temperature": temperature,
             "max_tokens": actual_max_tokens,
         }
-        
         if response_format:
-            kwargs["response_format"] = response_format
+            if self.provider in ("openai", "vertex", "azure"):
+                kwargs["response_format"] = response_format
+            else:
+                kwargs["model_kwargs"] = {"response_format": response_format}
+            
+        bound_model = self._model.bind(**kwargs)
         
         prompt_len = sum(len(m.get("content", "")) for m in messages)
-        logger.info(f"[LLM] Sending request to {self.provider}:{self.model} (prompt length ~{prompt_len} chars, response_format={response_format})")
+        logger.info(f"[LLM] Sending request via LangChain to {self.provider}:{self.model} (prompt length ~{prompt_len} chars)")
         start_time = time.time()
         
         def _complete():
-            client = self._active_client()
-            return client.chat.completions.create(**kwargs)
+            return bound_model.invoke(lc_messages)
 
         try:
             response = run_pipeline_step(
@@ -339,19 +297,11 @@ class LLMClient:
             logger.error(f"[LLM] Request failed on {self.provider}:{self.model} in {elapsed:.2f}s: {e}")
             raise
 
-        if not response.choices:
-            raise ValueError("LLM returned no choices")
-        choice = response.choices[0]
-        message = choice.message
-        if message is None:
-            finish = getattr(choice, "finish_reason", None) or "unknown"
-            raise ValueError(
-                f"LLM returned no message content (finish_reason={finish!r}). "
-                "Increase max_tokens or reduce the requested output size."
-            )
-        content = message.content or ""
-        # Some models include hidden reasoning tags in content; remove them.
+        content = response.content or ""
         content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        
+        # Store in Cache
+        cache.set(messages, params, content)
         return content
 
     async def achat(
@@ -361,26 +311,43 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         response_format: Optional[Dict] = None
     ) -> str:
-        """Async chat completion request returning text content."""
-        import time
+        """Async chat completion request returning text content using LangChain."""
         actual_max_tokens = max_tokens if max_tokens is not None else Config.LLM_CHAT_MAX_TOKENS
-        kwargs = {
+
+        # Check global LLM Cache
+        from .llm_cache import LLMCache
+        cache = LLMCache.get_instance()
+        params = {
+            "temperature": temperature,
+            "max_tokens": actual_max_tokens,
+            "response_format": response_format,
+            "provider": self.provider,
             "model": self.model,
-            "messages": messages,
+        }
+        cached_response = cache.get(messages, params)
+        if cached_response is not None:
+            return cached_response
+
+        lc_messages = self._convert_messages(messages)
+        
+        kwargs = {
             "temperature": temperature,
             "max_tokens": actual_max_tokens,
         }
-
         if response_format:
-            kwargs["response_format"] = response_format
+            if self.provider in ("openai", "vertex", "azure"):
+                kwargs["response_format"] = response_format
+            else:
+                kwargs["model_kwargs"] = {"response_format": response_format}
+            
+        bound_model = self._model.bind(**kwargs)
 
         prompt_len = sum(len(m.get("content", "")) for m in messages)
-        logger.info(f"[LLM] Sending async request to {self.provider}:{self.model} (prompt length ~{prompt_len} chars, response_format={response_format})")
+        logger.info(f"[LLM] Sending async request via LangChain to {self.provider}:{self.model} (prompt length ~{prompt_len} chars)")
         start_time = time.time()
 
         async def _complete():
-            client = self._active_async_client()
-            return await client.chat.completions.create(**kwargs)
+            return await bound_model.ainvoke(lc_messages)
 
         try:
             response = await run_pipeline_step_async(
@@ -395,18 +362,12 @@ class LLMClient:
             logger.error(f"[LLM] Async request failed on {self.provider}:{self.model} in {elapsed:.2f}s: {e}")
             raise
 
-        if not response.choices:
-            raise ValueError("LLM returned no choices")
-        choice = response.choices[0]
-        message = choice.message
-        if message is None:
-            finish = getattr(choice, "finish_reason", None) or "unknown"
-            raise ValueError(
-                f"LLM returned no message content (finish_reason={finish!r}). "
-                "Increase max_tokens or reduce the requested output size."
-            )
-        content = message.content or ""
-        return re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        content = response.content or ""
+        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+        
+        # Store in Cache
+        cache.set(messages, params, content)
+        return content
     
     def chat_json(
         self,

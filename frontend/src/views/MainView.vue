@@ -93,7 +93,7 @@ import Step2EnvSetup from '../components/Step2EnvSetup.vue'
 import HeaderQuery from '../components/HeaderQuery.vue'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
 import { createSimulation } from '../api/simulation'
-import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
+import { getPendingUpload, clearPendingUpload, getRunOptions } from '../store/pendingUpload'
 import { usePipelineAutopilot } from '../composables/usePipelineAutopilot'
 import LanguageSwitcher from '../components/LanguageSwitcher.vue'
 
@@ -251,6 +251,12 @@ const retryOntology = async () => {
   formData.append('project_id', currentProjectId.value)
   formData.append('force', 'true')
 
+  const hasStoredFiles = (projectData.value?.files?.length || 0) > 0
+  const runOpts = getRunOptions()
+  if (!hasStoredFiles && runOpts.useVertexSearch) {
+    formData.append('use_vertex_search', 'true')
+  }
+
   try {
     const res = await generateOntology(formData)
     if (res.success && res.data?.task_id) {
@@ -304,9 +310,9 @@ const initProject = async () => {
 
 const handleNewProject = async () => {
   const pending = getPendingUpload()
-  if (!pending.isPending || (pending.files.length === 0 && !pending.useVertexSearch)) {
-    error.value = 'No pending seed data (add files or enable Gemini web search).'
-    addLog('Error: No pending files or Gemini web search flag for new project.')
+  if (!pending.isPending || !pending.simulationRequirement.trim()) {
+    error.value = 'No pending simulation requirement.'
+    addLog('Error: No simulation requirement for new project.')
     return
   }
   
@@ -385,6 +391,12 @@ const loadProject = async () => {
       } else if (res.data.status === 'graph_completed' && res.data.graph_id) {
         currentPhase.value = 2
         await loadGraph(res.data.graph_id)
+      } else if (res.data.status === 'failed') {
+        currentPhase.value = 0
+        const errMsg = res.data.error || 'Project failed during ontology generation'
+        stepErrors.value.ontology = errMsg
+        error.value = errMsg
+        addLog(`Project failed: ${errMsg}`, 'error')
       }
     } else {
       error.value = res.error
@@ -404,7 +416,9 @@ const updatePhaseByStatus = (status) => {
     case 'ontology_generated': currentPhase.value = 0; break;
     case 'graph_building': currentPhase.value = 1; break;
     case 'graph_completed': currentPhase.value = 2; break;
-    case 'failed': error.value = 'Project failed'; break;
+    case 'failed':
+      currentPhase.value = 0;
+      break;
   }
 }
 

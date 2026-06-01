@@ -166,264 +166,30 @@
         </div>
 
         <!-- Chat Mode -->
-        <div v-if="activeTab === 'chat'" class="chat-container">
-
-          <!-- Report Agent Tools Card -->
-          <div v-if="chatTarget === 'report_agent'" class="report-agent-tools-card">
-            <div class="tools-card-header">
-              <div class="tools-card-avatar">R</div>
-              <div class="tools-card-info">
-                <div class="tools-card-name">{{ $t('step5.reportAgentChat') }}</div>
-                <div class="tools-card-subtitle">{{ $t('step5.reportAgentDesc') }}</div>
-              </div>
-              <button class="tools-card-toggle" @click="showToolsDetail = !showToolsDetail">
-                <svg :class="{ 'is-expanded': showToolsDetail }" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="6 9 12 15 18 9"></polyline>
-                </svg>
-              </button>
-            </div>
-            <div v-if="showToolsDetail" class="tools-card-body">
-              <div class="tools-grid">
-                <div class="tool-item tool-purple">
-                  <div class="tool-icon-wrapper">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.5V17a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-2.5A7 7 0 0 0 12 2z"></path>
-                    </svg>
-                  </div>
-                  <div class="tool-content">
-                    <div class="tool-name">{{ $t('step5.toolInsightForge') }}</div>
-                    <div class="tool-desc">{{ $t('step5.toolInsightForgeDesc') }}</div>
-                  </div>
-                </div>
-                <div class="tool-item tool-blue">
-                  <div class="tool-icon-wrapper">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                      <circle cx="12" cy="12" r="10"></circle>
-                      <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
-                    </svg>
-                  </div>
-                  <div class="tool-content">
-                    <div class="tool-name">{{ $t('step5.toolPanoramaSearch') }}</div>
-                    <div class="tool-desc">{{ $t('step5.toolPanoramaSearchDesc') }}</div>
-                  </div>
-                </div>
-                <div class="tool-item tool-orange">
-                  <div class="tool-icon-wrapper">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-                    </svg>
-                  </div>
-                  <div class="tool-content">
-                    <div class="tool-name">{{ $t('step5.toolQuickSearch') }}</div>
-                    <div class="tool-desc">{{ $t('step5.toolQuickSearchDesc') }}</div>
-                  </div>
-                </div>
-                <div class="tool-item tool-green">
-                  <div class="tool-icon-wrapper">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-                      <circle cx="9" cy="7" r="4"></circle>
-                      <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"></path>
-                    </svg>
-                  </div>
-                  <div class="tool-content">
-                    <div class="tool-name">{{ $t('step5.toolInterviewSubAgent') }}</div>
-                    <div class="tool-desc">{{ $t('step5.toolInterviewSubAgentDesc') }}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Agent Profile Card -->
-          <div v-if="chatTarget === 'agent' && selectedAgent" class="agent-profile-card">
-            <div class="profile-card-header">
-              <div class="profile-card-avatar">{{ (selectedAgent.username || 'A')[0] }}</div>
-              <div class="profile-card-info">
-                <div class="profile-card-name">{{ selectedAgent.username }}</div>
-                <div class="profile-card-meta">
-                  <span v-if="selectedAgent.name" class="profile-card-handle">@{{ selectedAgent.name }}</span>
-                  <span class="profile-card-profession">{{ selectedAgent.profession || $t('step2.unknownProfession') }}</span>
-                </div>
-              </div>
-              <button class="profile-card-toggle" @click="showFullProfile = !showFullProfile">
-                <svg :class="{ 'is-expanded': showFullProfile }" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="6 9 12 15 18 9"></polyline>
-                </svg>
-              </button>
-            </div>
-            <div v-if="showFullProfile && selectedAgent.bio" class="profile-card-body">
-              <div class="profile-card-bio">
-                <div class="profile-card-label">{{ $t('step5.profileBio') }}</div>
-                <p>{{ selectedAgent.bio }}</p>
-              </div>
-            </div>
-          </div>
-
-          <!-- Chat Messages -->
-          <div class="chat-messages" ref="chatMessages">
-            <div v-if="chatHistory.length === 0" class="chat-empty">
-              <div class="empty-icon">
-                <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-                </svg>
-              </div>
-              <p class="empty-text">
-                {{ chatTarget === 'report_agent' ? $t('step5.chatEmptyReportAgent') : $t('step5.chatEmptyAgent') }}
-              </p>
-            </div>
-            <div 
-              v-for="(msg, idx) in chatHistory" 
-              :key="idx"
-              class="chat-message"
-              :class="msg.role"
-            >
-              <div class="message-avatar">
-                <span v-if="msg.role === 'user'">U</span>
-                <span v-else>{{ msg.role === 'assistant' && chatTarget === 'report_agent' ? 'R' : (selectedAgent?.username?.[0] || 'A') }}</span>
-              </div>
-              <div class="message-content">
-                <div class="message-header">
-                  <span class="sender-name">
-                    {{ msg.role === 'user' ? 'You' : (chatTarget === 'report_agent' ? 'Report Agent' : (selectedAgent?.username || 'Agent')) }}
-                  </span>
-                  <span class="message-time">{{ formatTime(msg.timestamp) }}</span>
-                </div>
-                <div class="message-text" v-html="renderMarkdown(msg.content)"></div>
-              </div>
-            </div>
-            <div v-if="isSending" class="chat-message assistant">
-              <div class="message-avatar">
-                <span>{{ chatTarget === 'report_agent' ? 'R' : (selectedAgent?.username?.[0] || 'A') }}</span>
-              </div>
-              <div class="message-content">
-                <div class="typing-indicator">
-                  <span></span>
-                  <span></span>
-                  <span></span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Chat Input -->
-          <div class="chat-input-area">
-            <textarea 
-              v-model="chatInput"
-              class="chat-input"
-              :placeholder="$t('step5.chatInputPlaceholder')"
-              @keydown.enter.exact.prevent="sendMessage"
-              :disabled="isSending || (!selectedAgent && chatTarget === 'agent')"
-              rows="1"
-              ref="chatInputRef"
-            ></textarea>
-            <button 
-              class="send-btn"
-              @click="sendMessage"
-              :disabled="!chatInput.trim() || isSending || (!selectedAgent && chatTarget === 'agent')"
-            >
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-                <line x1="22" y1="2" x2="11" y2="13"></line>
-                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-              </svg>
-            </button>
-          </div>
-        </div>
+        <AgentChatBox
+          v-if="activeTab === 'chat'"
+          :chat-target="chatTarget"
+          :selected-agent="selectedAgent"
+          :chat-history="chatHistory"
+          :is-sending="isSending"
+          :format-time="formatTime"
+          :render-markdown="renderMarkdown"
+          @send-message="sendMessage"
+        />
 
         <!-- Survey Mode -->
-        <div v-if="activeTab === 'survey'" class="survey-container">
-          <!-- Survey Setup -->
-          <div class="survey-setup">
-            <div class="setup-section">
-              <div class="section-header">
-                <span class="section-title">{{ $t('step5.selectSurveyTarget') }}</span>
-                <span class="selection-count">{{ $t('step5.selectedCount', { selected: selectedAgents.size, total: profiles.length }) }}</span>
-              </div>
-              <div class="agents-grid">
-                <label 
-                  v-for="(agent, idx) in profiles" 
-                  :key="idx"
-                  class="agent-checkbox"
-                  :class="{ checked: selectedAgents.has(idx) }"
-                >
-                  <input 
-                    type="checkbox" 
-                    :checked="selectedAgents.has(idx)"
-                    @change="toggleAgentSelection(idx)"
-                  >
-                  <div class="checkbox-avatar">{{ (agent.username || 'A')[0] }}</div>
-                  <div class="checkbox-info">
-                    <span class="checkbox-name">{{ agent.username }}</span>
-                    <span class="checkbox-role">{{ agent.profession || $t('step2.unknownProfession') }}</span>
-                  </div>
-                  <div class="checkbox-indicator">
-                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="3">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                  </div>
-                </label>
-              </div>
-              <div class="selection-actions">
-                <button class="action-link" @click="selectAllAgents">{{ $t('step5.selectAll') }}</button>
-                <span class="action-divider">|</span>
-                <button class="action-link" @click="clearAgentSelection">{{ $t('step5.clearSelection') }}</button>
-              </div>
-            </div>
-
-            <div class="setup-section">
-              <div class="section-header">
-                <span class="section-title">{{ $t('step5.surveyQuestions') }}</span>
-              </div>
-              <textarea 
-                v-model="surveyQuestion"
-                class="survey-input"
-                :placeholder="$t('step5.surveyInputPlaceholder')"
-                rows="3"
-              ></textarea>
-            </div>
-
-            <button 
-              class="survey-submit-btn"
-              :disabled="selectedAgents.size === 0 || !surveyQuestion.trim() || isSurveying"
-              @click="submitSurvey"
-            >
-              <span v-if="isSurveying" class="loading-spinner"></span>
-              <span v-else>{{ $t('step5.submitSurvey') }}</span>
-            </button>
-          </div>
-
-          <!-- Survey Results -->
-          <div v-if="surveyResults.length > 0" class="survey-results">
-            <div class="results-header">
-              <span class="results-title">{{ $t('step5.surveyResults') }}</span>
-              <span class="results-count">{{ $t('step5.surveyResultsCount', { count: surveyResults.length }) }}</span>
-            </div>
-            <div class="results-list">
-              <div 
-                v-for="(result, idx) in surveyResults" 
-                :key="idx"
-                class="result-card"
-              >
-                <div class="result-header">
-                  <div class="result-avatar">{{ (result.agent_name || 'A')[0] }}</div>
-                  <div class="result-info">
-                    <span class="result-name">{{ result.agent_name }}</span>
-                    <span class="result-role">{{ result.profession || $t('step2.unknownProfession') }}</span>
-                  </div>
-                </div>
-                <div class="result-question">
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10"></circle>
-                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
-                    <line x1="12" y1="17" x2="12.01" y2="17"></line>
-                  </svg>
-                  <span>{{ result.question }}</span>
-                </div>
-                <div class="result-answer" v-html="renderMarkdown(result.answer)"></div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <MetricsDashboard
+          v-if="activeTab === 'survey'"
+          :selected-agents="selectedAgents"
+          :profiles="profiles"
+          :is-surveying="isSurveying"
+          :survey-results="surveyResults"
+          :render-markdown="renderMarkdown"
+          @toggle-agent-selection="toggleAgentSelection"
+          @select-all-agents="selectAllAgents"
+          @clear-agent-selection="clearAgentSelection"
+          @submit-survey="submitSurvey"
+        />
       </div>
     </div>
   </div>
@@ -434,6 +200,8 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { chatWithReport, getReport, getAgentLog } from '../api/report'
 import { interviewAgents, getSimulationProfilesRealtime } from '../api/simulation'
+import AgentChatBox from './AgentChatBox.vue'
+import MetricsDashboard from './MetricsDashboard.vue'
 
 const { t } = useI18n()
 
@@ -451,20 +219,14 @@ const chatTarget = ref('report_agent')
 const showAgentDropdown = ref(false)
 const selectedAgent = ref(null)
 const selectedAgentIndex = ref(null)
-const showFullProfile = ref(true)
-const showToolsDetail = ref(true)
 
 // Chat State
-const chatInput = ref('')
 const chatHistory = ref([])
 const chatHistoryCache = ref({}) // 缓存所有对话记录: { 'report_agent': [], 'agent_0': [], 'agent_1': [], ... }
 const isSending = ref(false)
-const chatMessages = ref(null)
-const chatInputRef = ref(null)
 
 // Survey State
 const selectedAgents = ref(new Set())
-const surveyQuestion = ref('')
 const surveyResults = ref([])
 const isSurveying = ref(false)
 
@@ -670,27 +432,25 @@ const renderMarkdown = (content) => {
 }
 
 // Chat Methods
-const sendMessage = async () => {
-  if (!chatInput.value.trim() || isSending.value) return
+const sendMessage = async (message) => {
+  if (!message || !message.trim() || isSending.value) return
   
-  const message = chatInput.value.trim()
-  chatInput.value = ''
+  const trimmedMessage = message.trim()
   
   // Add user message
   chatHistory.value.push({
     role: 'user',
-    content: message,
+    content: trimmedMessage,
     timestamp: new Date().toISOString()
   })
   
-  scrollToBottom()
   isSending.value = true
   
   try {
     if (chatTarget.value === 'report_agent') {
-      await sendToReportAgent(message)
+      await sendToReportAgent(trimmedMessage)
     } else {
-      await sendToAgent(message)
+      await sendToAgent(trimmedMessage)
     }
   } catch (err) {
     addLog(t('log.sendFailed', { error: err.message }))
@@ -701,7 +461,6 @@ const sendMessage = async () => {
     })
   } finally {
     isSending.value = false
-    scrollToBottom()
     // 自动保存对话记录到缓存
     saveChatHistory()
   }
@@ -801,14 +560,6 @@ const sendToAgent = async (message) => {
   }
 }
 
-const scrollToBottom = () => {
-  nextTick(() => {
-    if (chatMessages.value) {
-      chatMessages.value.scrollTop = chatMessages.value.scrollHeight
-    }
-  })
-}
-
 // Survey Methods
 const toggleAgentSelection = (idx) => {
   const newSet = new Set(selectedAgents.value)
@@ -830,8 +581,8 @@ const clearAgentSelection = () => {
   selectedAgents.value = new Set()
 }
 
-const submitSurvey = async () => {
-  if (selectedAgents.value.size === 0 || !surveyQuestion.value.trim()) return
+const submitSurvey = async (question) => {
+  if (selectedAgents.value.size === 0 || !question || !question.trim()) return
   
   isSurveying.value = true
   addLog(t('log.sendSurvey', { count: selectedAgents.value.size }))
@@ -839,7 +590,7 @@ const submitSurvey = async () => {
   try {
     const interviews = Array.from(selectedAgents.value).map(idx => ({
       agent_id: idx,
-      prompt: surveyQuestion.value.trim()
+      prompt: question.trim()
     }))
     
     const res = await interviewAgents({
@@ -882,7 +633,7 @@ const submitSurvey = async () => {
           agent_id: agentIdx,
           agent_name: agent?.username || `Agent ${agentIdx}`,
           profession: agent?.profession,
-          question: surveyQuestion.value.trim(),
+          question: question.trim(),
           answer: responseContent
         })
       }

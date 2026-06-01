@@ -149,23 +149,24 @@ def test_domain_modules_integration():
 
 
 def test_report_agent_module_selection():
-    agent = ReportAgent("dummy_graph", "dummy_sim", "Dormitory formaldehyde policy regulation and risk")
+    from app.utils.llm_client import LLMClient
+    agent = ReportAgent("dummy_graph", "dummy_sim", "Dormitory formaldehyde policy regulation and risk", llm_client=LLMClient(api_key="dummy_api_key"))
     module = agent._select_analytical_module("Market reactions to policy")
     # Both "policy" and "market" exist. "market" comes first in our cascade, so it selects Markets
     assert isinstance(module, MarketsAnalyticalModule)
 
     # Test policy only
-    agent_p = ReportAgent("dummy_graph", "dummy_sim", "New compliance and enforcement act")
+    agent_p = ReportAgent("dummy_graph", "dummy_sim", "New compliance and enforcement act", llm_client=LLMClient(api_key="dummy_api_key"))
     module_p = agent_p._select_analytical_module("Regulatory review section")
     assert isinstance(module_p, PolicyAnalyticalModule)
 
     # Test operational risk only
-    agent_r = ReportAgent("dummy_graph", "dummy_sim", "Operational continuity under crisis")
+    agent_r = ReportAgent("dummy_graph", "dummy_sim", "Operational continuity under crisis", llm_client=LLMClient(api_key="dummy_api_key"))
     module_r = agent_r._select_analytical_module("Vulnerability assessment")
     assert isinstance(module_r, OrganizationalRiskAnalyticalModule)
 
     # Test generic fallback
-    agent_f = ReportAgent("dummy_graph", "dummy_sim", "Some general topic")
+    agent_f = ReportAgent("dummy_graph", "dummy_sim", "Some general topic", llm_client=LLMClient(api_key="dummy_api_key"))
     module_f = agent_f._select_analytical_module("General discussion")
     assert isinstance(module_f, BaseAnalyticalModule)
 
@@ -666,7 +667,8 @@ def test_cross_section_consistency_pass_persists_revisions(tmp_path, monkeypatch
     monkeypatch.setattr(ReportManager, "REPORTS_DIR", os.path.join(str(tmp_path), "reports"))
     
     # Initialize report agent
-    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement")
+    from app.utils.llm_client import LLMClient
+    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement", llm_client=LLMClient(api_key="dummy_api_key"))
     
     # Mock LLM and detector responses
     class MockComposerLLM:
@@ -726,11 +728,11 @@ def test_cross_section_multipass_loop(tmp_path, monkeypatch):
     import os
     from app.config import Config
     from app.services.report_agent import ReportOutline, ReportSection, ReportManager
-    
     monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path))
     monkeypatch.setattr(ReportManager, "REPORTS_DIR", os.path.join(str(tmp_path), "reports"))
-    
-    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement")
+
+    from app.utils.llm_client import LLMClient
+    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement", llm_client=LLMClient(api_key="dummy_api_key"))
     
     # Mock LLM to return different things on successive calls or just trace call count
     call_count = 0
@@ -793,11 +795,12 @@ def test_structured_issue_matching(tmp_path, monkeypatch):
     import os
     from app.config import Config
     from app.services.report_agent import ReportOutline, ReportSection, ReportManager
-    
+
     monkeypatch.setattr(Config, "UPLOAD_FOLDER", str(tmp_path))
     monkeypatch.setattr(ReportManager, "REPORTS_DIR", os.path.join(str(tmp_path), "reports"))
-    
-    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement")
+
+    from app.utils.llm_client import LLMClient
+    agent = ReportAgent("dummy_graph", "dummy_sim", "Some requirement", llm_client=LLMClient(api_key="dummy_api_key"))
     
     # Setup sections where some share similar numbers but only specific ones are involved
     # E.g. section 1 and 2 are in contradiction, but section 3 contains the same numbers but is unrelated

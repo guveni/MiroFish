@@ -14,6 +14,18 @@ const service = axios.create({
 service.interceptors.request.use(
   config => {
     config.headers['Accept-Language'] = i18n.global.locale.value
+    
+    // Let the browser set multipart boundaries for file uploads.
+    if (config.data instanceof FormData) {
+      delete config.headers['Content-Type']
+    }
+    
+    // Add auth token if present
+    const token = localStorage.getItem('mirofish_token')
+    if (token) {
+      config.headers['Authorization'] = `Bearer ${token}`
+    }
+    
     return config
   },
   error => {
@@ -37,6 +49,15 @@ service.interceptors.response.use(
   },
   error => {
     console.error('Response error:', error)
+    
+    // Handle 401 Unauthorized
+    if (error.response && error.response.status === 401) {
+      localStorage.removeItem('mirofish_token')
+      localStorage.removeItem('mirofish_user')
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login'
+      }
+    }
     
     // 处理超时
     if (error.code === 'ECONNABORTED' && error.message.includes('timeout')) {

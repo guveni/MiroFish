@@ -23,6 +23,7 @@ def _post_search(query: str) -> Dict[str, Any]:
     headers = {
         "Authorization": f"Bearer {Config.KEIRO_API_KEY}",
         "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
     payload = {
         "query": query,
@@ -94,7 +95,7 @@ def search_queries_to_corpus(
                     if uri:
                         all_uris.add(uri)
                         src_objs.append({"title": title, "uri": uri})
-                    snippet = content or (r.get("description") or "").strip()
+                    snippet = content or (r.get("snippet") or r.get("description") or "").strip()
                     if snippet:
                         label = f"[{title}]({uri})" if title and uri else (title or uri or "")
                         body_parts.append(f"- {label}: {snippet[:3000]}" if label else f"- {snippet[:3000]}")

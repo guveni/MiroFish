@@ -1,14 +1,109 @@
 services:
-  mirofish:
-    image: ghcr.io/666ghj/mirofish:latest
-    # 加速镜像（如拉取缓慢可替换上方地址）
-    # image: ghcr.nju.edu.cn/666ghj/mirofish:latest
-    container_name: mirofish
+  # Relational Database (PostgreSQL)
+  db:
+    image: postgres:15-alpine
+    container_name: mirofish_db
+    restart: always
+    environment:
+      POSTGRES_USER: mirofish
+      POSTGRES_PASSWORD: mirofish-dev-pwd
+      POSTGRES_DB: mirofish
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mirofish"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Graph Database (Neo4j)
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: mirofish_neo4j
+    restart: always
+    ports:
+      - "7474:7474" # HTTP
+      - "7687:7687" # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/mirofish-dev
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p mirofish-dev 'RETURN 1'"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  # Inngest Dev Server for background & durable tasks
+  inngest:
+    image: inngest/inngest:latest
+    container_name: mirofish_inngest
+    restart: always
+    ports:
+      - "8288:8288"
+    command: inngest dev -u http://backend:5001/api/inngest --host 0.0.0.0
+    depends_on:
+      backend:
+        condition: service_started
+
+  # Flask Backend API Service
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: mirofish_backend
+    restart: always
     env_file:
       - .env
     ports:
-      - "3000:3000"
       - "5001:5001"
-    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://mirofish:mirofish-dev-pwd@db:5432/mirofish
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=mirofish-dev
+      - INNGEST_DEV=1
+      - INNGEST_API_BASE_URL=http://inngest:8288
+      - INNGEST_EVENT_API_BASE_URL=http://inngest:8288
+      - FLASK_DEBUG=False
+      # Vertex AI uses Application Default Credentials (gcloud login or service account JSON).
+      - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
+      # Inherit active LLM keys and configurations from the host system or .env
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME}
+      - LLM_USE_VERTEX_AI=${LLM_USE_VERTEX_AI}
+      - VERTEX_AI_PROJECT_ID=${VERTEX_AI_PROJECT_ID}
+      - VERTEX_AI_LOCATION=${VERTEX_AI_LOCATION}
+    depends_on:
+      db:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
     volumes:
-      - ./backend/uploads:/app/backend/uploads
+      # Bind local uploads so pre-Docker simulation history and project files remain visible.
+      - ./backend/uploads:/app/uploads
+      # Mount host gcloud ADC for LLM_PROVIDER=vertex (run: gcloud auth application-default login)
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+
+  # Vue3 Frontend Service
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: mirofish_frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:

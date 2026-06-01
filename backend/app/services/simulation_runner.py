@@ -1,6 +1,6 @@
 """
-OASIS模拟运行器
-在后台运行模拟并记录每个Agent的动作，支持实时状态监控
+OASIS Simulation Runner
+Runs simulation in the background, logs each Agent action, and supports real-time monitoring.
 """
 
 import os
@@ -12,10 +12,8 @@ import threading
 import subprocess
 import signal
 import atexit
-from typing import Dict, Any, List, Optional, Union
-from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from typing import Dict, Any, List, Optional, Union
 from queue import Queue
 
 from ..config import Config
@@ -24,174 +22,15 @@ from ..utils.locale import get_locale, set_locale
 from .zep_graph_memory_updater import ZepGraphMemoryManager
 from .simulation_ipc import SimulationIPCClient, CommandType, IPCResponse
 from .run_checkpoint_store import checkpoint_simulation_stage
+from ..models.simulation import RunnerStatus, AgentAction, RoundSummary, SimulationRunState
 
 logger = get_logger('mirofish.simulation_runner')
 
-# 标记是否已注册清理函数
+# Flag to track if cleanup function has been registered
 _cleanup_registered = False
 
-# 平台检测
+# Platform check
 IS_WINDOWS = sys.platform == 'win32'
-
-
-class RunnerStatus(str, Enum):
-    """运行器状态"""
-    IDLE = "idle"
-    STARTING = "starting"
-    RUNNING = "running"
-    PAUSED = "paused"
-    STOPPING = "stopping"
-    STOPPED = "stopped"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-@dataclass
-class AgentAction:
-    """Agent动作记录"""
-    round_num: int
-    timestamp: str
-    platform: str  # twitter / reddit
-    agent_id: int
-    agent_name: str
-    action_type: str  # CREATE_POST, LIKE_POST, etc.
-    action_args: Dict[str, Any] = field(default_factory=dict)
-    result: Optional[str] = None
-    success: bool = True
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "round_num": self.round_num,
-            "timestamp": self.timestamp,
-            "platform": self.platform,
-            "agent_id": self.agent_id,
-            "agent_name": self.agent_name,
-            "action_type": self.action_type,
-            "action_args": self.action_args,
-            "result": self.result,
-            "success": self.success,
-        }
-
-
-@dataclass
-class RoundSummary:
-    """每轮摘要"""
-    round_num: int
-    start_time: str
-    end_time: Optional[str] = None
-    simulated_hour: int = 0
-    twitter_actions: int = 0
-    reddit_actions: int = 0
-    active_agents: List[int] = field(default_factory=list)
-    actions: List[AgentAction] = field(default_factory=list)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "round_num": self.round_num,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "simulated_hour": self.simulated_hour,
-            "twitter_actions": self.twitter_actions,
-            "reddit_actions": self.reddit_actions,
-            "active_agents": self.active_agents,
-            "actions_count": len(self.actions),
-            "actions": [a.to_dict() for a in self.actions],
-        }
-
-
-@dataclass
-class SimulationRunState:
-    """模拟运行状态（实时）"""
-    simulation_id: str
-    runner_status: RunnerStatus = RunnerStatus.IDLE
-    
-    # 进度信息
-    current_round: int = 0
-    total_rounds: int = 0
-    simulated_hours: int = 0
-    total_simulation_hours: int = 0
-    
-    # 各平台独立轮次和模拟时间（用于双平台并行显示）
-    twitter_current_round: int = 0
-    reddit_current_round: int = 0
-    twitter_simulated_hours: int = 0
-    reddit_simulated_hours: int = 0
-    
-    # 平台状态
-    twitter_running: bool = False
-    reddit_running: bool = False
-    twitter_actions_count: int = 0
-    reddit_actions_count: int = 0
-    
-    # 平台完成状态（通过检测 actions.jsonl 中的 simulation_end 事件）
-    twitter_completed: bool = False
-    reddit_completed: bool = False
-    
-    # 每轮摘要
-    rounds: List[RoundSummary] = field(default_factory=list)
-    
-    # 最近动作（用于前端实时展示）
-    recent_actions: List[AgentAction] = field(default_factory=list)
-    max_recent_actions: int = 50
-    
-    # 时间戳
-    started_at: Optional[str] = None
-    updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
-    completed_at: Optional[str] = None
-    
-    # 错误信息
-    error: Optional[str] = None
-    
-    # 进程ID（用于停止）
-    process_pid: Optional[int] = None
-    
-    def add_action(self, action: AgentAction):
-        """添加动作到最近动作列表"""
-        self.recent_actions.insert(0, action)
-        if len(self.recent_actions) > self.max_recent_actions:
-            self.recent_actions = self.recent_actions[:self.max_recent_actions]
-        
-        if action.platform == "twitter":
-            self.twitter_actions_count += 1
-        else:
-            self.reddit_actions_count += 1
-        
-        self.updated_at = datetime.now().isoformat()
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "simulation_id": self.simulation_id,
-            "runner_status": self.runner_status.value,
-            "current_round": self.current_round,
-            "total_rounds": self.total_rounds,
-            "simulated_hours": self.simulated_hours,
-            "total_simulation_hours": self.total_simulation_hours,
-            "progress_percent": round(self.current_round / max(self.total_rounds, 1) * 100, 1),
-            # 各平台独立轮次和时间
-            "twitter_current_round": self.twitter_current_round,
-            "reddit_current_round": self.reddit_current_round,
-            "twitter_simulated_hours": self.twitter_simulated_hours,
-            "reddit_simulated_hours": self.reddit_simulated_hours,
-            "twitter_running": self.twitter_running,
-            "reddit_running": self.reddit_running,
-            "twitter_completed": self.twitter_completed,
-            "reddit_completed": self.reddit_completed,
-            "twitter_actions_count": self.twitter_actions_count,
-            "reddit_actions_count": self.reddit_actions_count,
-            "total_actions_count": self.twitter_actions_count + self.reddit_actions_count,
-            "started_at": self.started_at,
-            "updated_at": self.updated_at,
-            "completed_at": self.completed_at,
-            "error": self.error,
-            "process_pid": self.process_pid,
-        }
-    
-    def to_detail_dict(self) -> Dict[str, Any]:
-        """包含最近动作的详细信息"""
-        result = self.to_dict()
-        result["recent_actions"] = [a.to_dict() for a in self.recent_actions]
-        result["rounds_count"] = len(self.rounds)
-        return result
 
 
 class SimulationRunner:
@@ -331,7 +170,8 @@ class SimulationRunner:
         platform: str = "parallel",  # twitter / reddit / parallel
         max_rounds: int = None,  # 最大模拟轮数（可选，用于截断过长的模拟）
         enable_graph_memory_update: bool = False,  # 是否将活动更新到Zep图谱
-        graph_id: str = None  # Zep图谱ID（启用图谱更新时必需）
+        graph_id: str = None,  # Zep图谱ID（启用图谱更新时必需）
+        allow_starting: bool = False  # 是否允许在已有状态为STARTING时启动
     ) -> SimulationRunState:
         """
         启动模拟
@@ -348,8 +188,11 @@ class SimulationRunner:
         """
         # 检查是否已在运行
         existing = cls.get_run_state(simulation_id)
-        if existing and existing.runner_status in [RunnerStatus.RUNNING, RunnerStatus.STARTING]:
-            raise ValueError(f"模拟已在运行中: {simulation_id}")
+        if existing:
+            if existing.runner_status == RunnerStatus.RUNNING:
+                raise ValueError(f"模拟已在运行中: {simulation_id}")
+            if existing.runner_status == RunnerStatus.STARTING and not allow_starting:
+                raise ValueError(f"模拟已在运行中: {simulation_id}")
         
         # 加载模拟配置
         sim_dir = os.path.join(cls.RUN_STATE_DIR, simulation_id)
@@ -367,12 +210,12 @@ class SimulationRunner:
         minutes_per_round = time_config.get("minutes_per_round", 30)
         total_rounds = int(total_hours * 60 / minutes_per_round)
         
-        # 如果指定了最大轮数，则截断
+        # If max_rounds is specified, truncate
         if max_rounds is not None and max_rounds > 0:
             original_rounds = total_rounds
             total_rounds = min(total_rounds, max_rounds)
             if total_rounds < original_rounds:
-                logger.info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
+                logger.info(f"Rounds truncated: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
         
         state = SimulationRunState(
             simulation_id=simulation_id,
@@ -384,7 +227,7 @@ class SimulationRunner:
         
         cls._save_run_state(state)
         
-        # 如果启用图谱记忆更新，创建更新器
+        # If graph memory update is enabled, create updater
         if enable_graph_memory_update:
             if not graph_id:
                 raise ValueError("启用图谱记忆更新时必须提供 graph_id")
@@ -392,9 +235,9 @@ class SimulationRunner:
             try:
                 ZepGraphMemoryManager.create_updater(simulation_id, graph_id)
                 cls._graph_memory_enabled[simulation_id] = True
-                logger.info(f"已启用图谱记忆更新: simulation_id={simulation_id}, graph_id={graph_id}")
+                logger.info(f"Enabled graph memory update: simulation_id={simulation_id}, graph_id={graph_id}")
             except Exception as e:
-                logger.error(f"创建图谱记忆更新器失败: {e}")
+                logger.error(f"Failed to create graph memory updater: {e}")
                 cls._graph_memory_enabled[simulation_id] = False
         else:
             cls._graph_memory_enabled[simulation_id] = False
@@ -474,7 +317,7 @@ class SimulationRunner:
             # Capture locale before spawning monitor thread
             current_locale = get_locale()
 
-            # 启动监控线程
+            # Start monitor thread
             monitor_thread = threading.Thread(
                 target=cls._monitor_simulation,
                 args=(simulation_id, current_locale),
@@ -483,7 +326,7 @@ class SimulationRunner:
             monitor_thread.start()
             cls._monitor_threads[simulation_id] = monitor_thread
             
-            logger.info(f"模拟启动成功: {simulation_id}, pid={process.pid}, platform={platform}")
+            logger.info(f"Simulation started successfully: {simulation_id}, pid={process.pid}, platform={platform}")
             proj = cls._project_id_from_simulation_workspace(simulation_id)
             if proj:
                 try:
@@ -554,6 +397,16 @@ class SimulationRunner:
                         reddit_actions_log, reddit_position, state, "reddit"
                     )
                 
+                # 同步 SQLite 数据到 PostgreSQL
+                try:
+                    from ..utils.postgres_sync import sync_sqlite_to_postgres
+                    for pf in ["twitter", "reddit"]:
+                        sqlite_file = os.path.join(sim_dir, f"{pf}_simulation.db")
+                        if os.path.exists(sqlite_file):
+                            sync_sqlite_to_postgres(sqlite_file, simulation_id, pf)
+                except Exception as e:
+                    logger.error(f"Failed to sync SQLite to Postgres in background loop: {e}")
+
                 # 更新状态
                 cls._save_run_state(state)
                 time.sleep(2)
@@ -564,26 +417,36 @@ class SimulationRunner:
             if os.path.exists(reddit_actions_log):
                 cls._read_action_log(reddit_actions_log, reddit_position, state, "reddit")
             
-            # 进程结束
+            # 进程结束后的最终同步
+            try:
+                from ..utils.postgres_sync import sync_sqlite_to_postgres
+                for pf in ["twitter", "reddit"]:
+                    sqlite_file = os.path.join(sim_dir, f"{pf}_simulation.db")
+                    if os.path.exists(sqlite_file):
+                        sync_sqlite_to_postgres(sqlite_file, simulation_id, pf)
+            except Exception as e:
+                logger.error(f"Failed to execute final SQLite to Postgres sync: {e}")
+            
+            # Process ended
             exit_code = process.returncode
             
             if exit_code == 0:
                 state.runner_status = RunnerStatus.COMPLETED
                 state.completed_at = datetime.now().isoformat()
-                logger.info(f"模拟完成: {simulation_id}")
+                logger.info(f"Simulation completed: {simulation_id}")
             else:
                 state.runner_status = RunnerStatus.FAILED
-                # 从主日志文件读取错误信息
+                # Read error info from main log file
                 main_log_path = os.path.join(sim_dir, "simulation.log")
                 error_info = ""
                 try:
                     if os.path.exists(main_log_path):
                         with open(main_log_path, 'r', encoding='utf-8') as f:
-                            error_info = f.read()[-2000:]  # 取最后2000字符
+                            error_info = f.read()[-2000:]  # Get last 2000 chars
                 except Exception:
                     pass
-                state.error = f"进程退出码: {exit_code}, 错误: {error_info}"
-                logger.error(f"模拟失败: {simulation_id}, error={state.error}")
+                state.error = f"Process exit code: {exit_code}, error: {error_info}"
+                logger.error(f"Simulation failed: {simulation_id}, error={state.error}")
             
             state.twitter_running = False
             state.reddit_running = False
@@ -1757,9 +1620,16 @@ class SimulationRunner:
         db_path: str,
         platform_name: str,
         agent_id: Optional[int] = None,
-        limit: int = 100
+        limit: int = 100,
+        simulation_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """从单个数据库获取Interview历史"""
+        if simulation_id:
+            from ..utils.postgres_sync import get_interview_history_from_pg
+            pg_res = get_interview_history_from_pg(simulation_id, platform_name, agent_id, limit)
+            if pg_res is not None:
+                return pg_res
+
         import sqlite3
         
         if not os.path.exists(db_path):
@@ -1768,7 +1638,8 @@ class SimulationRunner:
         results = []
         
         try:
-            conn = sqlite3.connect(db_path)
+            db_abs_path = os.path.abspath(db_path)
+            conn = sqlite3.connect(f"file:{db_abs_path}?mode=ro&nolock=1", uri=True, timeout=30.0)
             cursor = conn.cursor()
             
             if agent_id is not None:
@@ -1849,7 +1720,8 @@ class SimulationRunner:
                 db_path=db_path,
                 platform_name=p,
                 agent_id=agent_id,
-                limit=limit
+                limit=limit,
+                simulation_id=simulation_id
             )
             results.extend(platform_results)
         

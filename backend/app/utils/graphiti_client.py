@@ -312,32 +312,38 @@ async def _ensure_indices(graphiti: Any) -> None:
     _indices_ready = True
 
 
+async def _init_client() -> None:
+    global _client
+    from graphiti_core import Graphiti
+    from graphiti_core.driver.neo4j_driver import Neo4jDriver
+
+    _set_default_openai_env()
+    llm_client, embedder, cross_encoder = _build_clients()
+    driver = Neo4jDriver(
+        Config.NEO4J_URI,
+        Config.NEO4J_USER,
+        Config.NEO4J_PASSWORD,
+        database=Config.NEO4J_DATABASE,
+    )
+    _client = Graphiti(
+        graph_driver=driver,
+        llm_client=llm_client,
+        embedder=embedder,
+        cross_encoder=cross_encoder,
+        max_coroutines=Config.graphiti_effective_semaphore_limit(),
+    )
+    await _ensure_indices(_client)
+
+
 def get_client():
     global _client
     with _client_lock:
         if _client is not None:
             return _client
 
-        from graphiti_core import Graphiti
-        from graphiti_core.driver.neo4j_driver import Neo4jDriver
-
-        _set_default_openai_env()
-        llm_client, embedder, cross_encoder = _build_clients()
-        driver = Neo4jDriver(
-            Config.NEO4J_URI,
-            Config.NEO4J_USER,
-            Config.NEO4J_PASSWORD,
-            database=Config.NEO4J_DATABASE,
-        )
-        _client = Graphiti(
-            graph_driver=driver,
-            llm_client=llm_client,
-            embedder=embedder,
-            cross_encoder=cross_encoder,
-            max_coroutines=Config.graphiti_effective_semaphore_limit(),
-        )
-    run_async(_ensure_indices(_client))
-    return _client
+        _ensure_loop()
+        run_async(_init_client())
+        return _client
 
 
 def is_available() -> tuple[bool, str | None]:

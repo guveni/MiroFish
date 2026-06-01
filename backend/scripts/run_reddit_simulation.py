@@ -312,7 +312,8 @@ class IPCHandler:
             return result
         
         try:
-            conn = sqlite3.connect(db_path)
+            db_abs_path = os.path.abspath(db_path)
+            conn = sqlite3.connect(f"file:{db_abs_path}?mode=ro&nolock=1", uri=True, timeout=30.0)
             cursor = conn.cursor()
             
             # 查询最新的Interview记录

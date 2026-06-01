@@ -1,9 +1,13 @@
 import json
 import os
 import threading
-from flask import request, has_request_context
+from contextvars import ContextVar
+from fastapi import Request
 
 _thread_local = threading.local()
+
+# ContextVar to store the current FastAPI request, set by middleware
+request_var: ContextVar[Request] = ContextVar("request", default=None)
 
 _locales_dir = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'locales')
 
@@ -28,8 +32,9 @@ def set_locale(locale: str):
 
 
 def get_locale() -> str:
-    if has_request_context():
-        raw = (request.headers.get('Accept-Language') or '').strip().split(',')[0].strip()
+    req = request_var.get()
+    if req is not None:
+        raw = (req.headers.get('Accept-Language') or '').strip().split(',')[0].strip()
         if not raw:
             raw = _DEFAULT_LOCALE
         base = raw.split('-')[0] if raw else _DEFAULT_LOCALE

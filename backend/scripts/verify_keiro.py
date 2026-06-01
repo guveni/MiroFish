@@ -76,6 +76,7 @@ def main() -> int:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         },
         method="POST",
     )
@@ -97,7 +98,7 @@ def main() -> int:
     for i, r in enumerate(results[:3]):
         title = r.get("title", "")
         uri = r.get("url", "")
-        content = (r.get("content") or "")[:120]
+        content = (r.get("content") or r.get("snippet") or r.get("description") or "")[:120]
         print(f"  [{i+1}] {title}")
         print(f"      {uri}")
         if content:

@@ -1,18 +1,19 @@
 """
-Project context management.
+Project context management using a SQL database backend.
 Persists project state server-side so the frontend does not need to pass large
 payloads between API calls.
 """
 
-import os
 import json
-import uuid
+import os
 import shutil
+import uuid
 from datetime import datetime
-from typing import Dict, Any, List, Optional
 from enum import Enum
-from dataclasses import dataclass, field, asdict
+from typing import Dict, Any, List, Optional
+
 from ..config import Config
+from ..database import db
 
 
 class ProjectStatus(str, Enum):
@@ -24,45 +25,42 @@ class ProjectStatus(str, Enum):
     FAILED = "failed"                # Failed
 
 
-@dataclass
-class Project:
-    """Project data model."""
-    project_id: str
-    name: str
-    status: ProjectStatus
-    created_at: str
-    updated_at: str
-    
-    # File information.
-    files: List[Dict[str, str]] = field(default_factory=list)  # [{filename, path, size}]
-    total_text_length: int = 0
-    
-    # Ontology information populated after API 1.
-    ontology: Optional[Dict[str, Any]] = None
-    analysis_summary: Optional[str] = None
-    
-    # Graph information populated after API 2.
-    graph_id: Optional[str] = None
-    graph_build_task_id: Optional[str] = None
-    graph_build_progress: int = 0
-    graph_build_message: str = ""
-    ontology_task_id: Optional[str] = None
-    
-    # Configuration.
-    simulation_requirement: Optional[str] = None
-    chunk_size: int = 500
-    chunk_overlap: int = 50
+class Project(db.Model):
+    """Project data model stored in database."""
+    __tablename__ = 'projects'
 
-    # Raw Gemini grounding metadata (queries, sources, usage, etc.); present only when Vertex Search is enabled.
-    gemini_grounding_metadata: Optional[Dict[str, Any]] = None
-    
-    # Error information.
-    error: Optional[str] = None
-    
+    project_id = db.Column(db.String(50), primary_key=True)
+    user_id = db.Column(db.String(50), db.ForeignKey('users.id'), nullable=True)
+    name = db.Column(db.String(255), nullable=False, default="Unnamed Project")
+    status = db.Column(db.String(50), nullable=False, default="created")
+    created_at = db.Column(db.String(100), nullable=False)
+    updated_at = db.Column(db.String(100), nullable=False)
+
+    # JSON fields
+    files = db.Column(db.JSON, nullable=False, default=list)  # [{'filename', 'path', 'size'}]
+    total_text_length = db.Column(db.Integer, default=0)
+
+    ontology = db.Column(db.JSON, nullable=True)  # {'entity_types', 'edge_types'}
+    analysis_summary = db.Column(db.Text, nullable=True)
+
+    graph_id = db.Column(db.String(100), nullable=True)
+    graph_build_task_id = db.Column(db.String(100), nullable=True)
+    graph_build_progress = db.Column(db.Integer, default=0)
+    graph_build_message = db.Column(db.Text, nullable=True)
+    ontology_task_id = db.Column(db.String(100), nullable=True)
+
+    simulation_requirement = db.Column(db.Text, nullable=True)
+    chunk_size = db.Column(db.Integer, default=500)
+    chunk_overlap = db.Column(db.Integer, default=50)
+
+    gemini_grounding_metadata = db.Column(db.JSON, nullable=True)
+    error = db.Column(db.Text, nullable=True)
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to a dictionary."""
         return {
             "project_id": self.project_id,
+            "user_id": self.user_id,
             "name": self.name,
             "status": self.status.value if isinstance(self.status, ProjectStatus) else self.status,
             "created_at": self.created_at,
@@ -82,18 +80,19 @@ class Project:
             "gemini_grounding_metadata": self.gemini_grounding_metadata,
             "error": self.error
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Project':
-        """Create from a dictionary."""
+        """Create a transient object from a dictionary (useful for fallback / testing)."""
         status = data.get('status', 'created')
         if isinstance(status, str):
             status = ProjectStatus(status)
-        
+
         return cls(
             project_id=data['project_id'],
+            user_id=data.get('user_id'),
             name=data.get('name', 'Unnamed Project'),
-            status=status,
+            status=status.value if isinstance(status, ProjectStatus) else status,
             created_at=data.get('created_at', ''),
             updated_at=data.get('updated_at', ''),
             files=data.get('files', []),
@@ -114,206 +113,272 @@ class Project:
 
 
 class ProjectManager:
-    """Project manager for persistent storage and retrieval."""
-    
-    # Project storage root.
+    """Project manager for persistent database storage and retrieval."""
+
     PROJECTS_DIR = os.path.join(Config.UPLOAD_FOLDER, 'projects')
-    
+
     @classmethod
     def _ensure_projects_dir(cls):
-        """Ensure the project directory exists."""
+        """Ensure the project directory exists (for temporary file storage)."""
         os.makedirs(cls.PROJECTS_DIR, exist_ok=True)
-    
+
     @classmethod
     def _get_project_dir(cls, project_id: str) -> str:
         """Return the project directory path."""
         return os.path.join(cls.PROJECTS_DIR, project_id)
-    
-    @classmethod
-    def _get_project_meta_path(cls, project_id: str) -> str:
-        """Return the project metadata file path."""
-        return os.path.join(cls._get_project_dir(project_id), 'project.json')
-    
+
     @classmethod
     def _get_project_files_dir(cls, project_id: str) -> str:
         """Return the project file storage directory."""
         return os.path.join(cls._get_project_dir(project_id), 'files')
-    
+
     @classmethod
     def _get_project_text_path(cls, project_id: str) -> str:
         """Return the extracted text storage path."""
         return os.path.join(cls._get_project_dir(project_id), 'extracted_text.txt')
-    
+
     @classmethod
-    def create_project(cls, name: str = "Unnamed Project") -> Project:
-        """
-        Create a new project.
-        
-        Args:
-            name: Project name.
-            
-        Returns:
-            Newly created Project object.
-        """
+    def _get_legacy_project_json_path(cls, project_id: str) -> str:
+        """Return the legacy on-disk project.json path (pre-PostgreSQL migrations)."""
+        return os.path.join(cls._get_project_dir(project_id), 'project.json')
+
+    @classmethod
+    def get_display_files(cls, project: Project, limit: int = 3) -> List[Dict[str, str]]:
+        """Return file metadata for UI display, falling back to on-disk legacy data."""
+        db_files = project.files or []
+        if db_files:
+            return [
+                {"filename": f.get("filename") or f.get("original_filename") or "Unknown File"}
+                for f in db_files[:limit]
+            ]
+
+        legacy_path = cls._get_legacy_project_json_path(project.project_id)
+        if os.path.isfile(legacy_path):
+            try:
+                with open(legacy_path, 'r', encoding='utf-8') as f:
+                    legacy = json.load(f)
+                legacy_files = legacy.get("files") or []
+                if legacy_files:
+                    return [
+                        {"filename": f.get("filename") or f.get("original_filename") or "Unknown File"}
+                        for f in legacy_files[:limit]
+                    ]
+            except Exception:
+                pass
+
+        disk_files = cls.get_project_files(project.project_id)
+        return [{"filename": os.path.basename(path)} for path in disk_files[:limit]]
+
+    @classmethod
+    def _ensure_project_dir(cls, project_id: str) -> str:
+        """Ensure the on-disk project directory exists (legacy projects may lack it)."""
         cls._ensure_projects_dir()
-        
-        project_id = f"proj_{uuid.uuid4().hex[:12]}"
-        now = datetime.now().isoformat()
-        
-        project = Project(
-            project_id=project_id,
-            name=name,
-            status=ProjectStatus.CREATED,
-            created_at=now,
-            updated_at=now
-        )
-        
-        # Create the project directory structure.
         project_dir = cls._get_project_dir(project_id)
         files_dir = cls._get_project_files_dir(project_id)
         os.makedirs(project_dir, exist_ok=True)
         os.makedirs(files_dir, exist_ok=True)
-        
-        # Save project metadata.
-        cls.save_project(project)
-        
+        return project_dir
+
+    @classmethod
+    def create_project(cls, name: str = "Unnamed Project", user_id: Optional[str] = None) -> Project:
+        """Create a new project in the database."""
+        cls._ensure_projects_dir()
+
+        project_id = f"proj_{uuid.uuid4().hex[:12]}"
+        now = datetime.now().isoformat()
+
+        project = Project(
+            project_id=project_id,
+            user_id=user_id,
+            name=name,
+            status=ProjectStatus.CREATED.value,
+            created_at=now,
+            updated_at=now,
+            files=[]
+        )
+
+        # Create the local project directory structure for temporary files.
+        cls._ensure_project_dir(project_id)
+
+        db.session.add(project)
+        db.session.commit()
+
         return project
-    
+
     @classmethod
     def save_project(cls, project: Project) -> None:
-        """Save project metadata."""
+        """Save project metadata to the database."""
         project.updated_at = datetime.now().isoformat()
-        meta_path = cls._get_project_meta_path(project.project_id)
         
-        with open(meta_path, 'w', encoding='utf-8') as f:
-            json.dump(project.to_dict(), f, ensure_ascii=False, indent=2)
-    
+        # Ensure the project is merged into the session if it's detached
+        if project not in db.session:
+            db.session.merge(project)
+        db.session.commit()
+
     @classmethod
     def get_project(cls, project_id: str) -> Optional[Project]:
-        """
-        Get a project.
-        
-        Args:
-            project_id: Project ID.
-            
-        Returns:
-            Project object, or None if it does not exist.
-        """
-        meta_path = cls._get_project_meta_path(project_id)
-        
-        if not os.path.exists(meta_path):
-            return None
-        
-        with open(meta_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        
-        return Project.from_dict(data)
-    
+        """Get a project by ID."""
+        return db.session.get(Project, project_id)
+
     @classmethod
-    def list_projects(cls, limit: int = 50) -> List[Project]:
-        """
-        List all projects.
-        
-        Args:
-            limit: Result limit.
-            
-        Returns:
-            Projects sorted by created_at descending.
-        """
-        cls._ensure_projects_dir()
-        
-        projects = []
-        for project_id in os.listdir(cls.PROJECTS_DIR):
-            project = cls.get_project(project_id)
-            if project:
-                projects.append(project)
+    def list_projects(cls, user_id: Optional[str] = None, limit: int = 50) -> List[Project]:
+        """List all projects, optionally filtered by user_id."""
+        query = Project.query
+        if user_id:
+            query = query.filter_by(user_id=user_id)
         
         # Sort by created_at descending.
-        projects.sort(key=lambda p: p.created_at, reverse=True)
-        
-        return projects[:limit]
-    
+        projects = query.order_by(Project.created_at.desc()).limit(limit).all()
+        return projects
+
     @classmethod
     def delete_project(cls, project_id: str) -> bool:
-        """
-        Delete a project and all of its files.
-        
-        Args:
-            project_id: Project ID.
-            
-        Returns:
-            Whether deletion succeeded.
-        """
-        project_dir = cls._get_project_dir(project_id)
-        
-        if not os.path.exists(project_dir):
+        """Delete a project and all of its files."""
+        project = cls.get_project(project_id)
+        if not project:
             return False
+
+        db.session.delete(project)
+        db.session.commit()
+
+        # Clean up GCS blobs if configured
+        bucket_name = os.environ.get("GCS_BUCKET_NAME")
+        if bucket_name:
+            try:
+                from google.cloud import storage
+                client = storage.Client()
+                bucket = client.bucket(bucket_name)
+                blobs = bucket.list_blobs(prefix=f"projects/{project_id}/")
+                for blob in blobs:
+                    blob.delete()
+            except Exception as e:
+                # Log but do not block deletion
+                pass
         
-        shutil.rmtree(project_dir)
+        # Clean up local files
+        project_dir = cls._get_project_dir(project_id)
+        if os.path.exists(project_dir):
+            shutil.rmtree(project_dir)
         return True
-    
+
     @classmethod
     def save_file_to_project(cls, project_id: str, file_storage, original_filename: str) -> Dict[str, str]:
-        """
-        Save an uploaded file to the project directory.
-        
-        Args:
-            project_id: Project ID.
-            file_storage: Flask FileStorage object.
-            original_filename: Original filename.
-            
-        Returns:
-            File info dictionary {filename, path, size}.
-        """
-        files_dir = cls._get_project_files_dir(project_id)
-        os.makedirs(files_dir, exist_ok=True)
-        
+        """Save an uploaded file to the project directory or GCS."""
+        cls._ensure_projects_dir()
+
         # Generate a safe filename.
         ext = os.path.splitext(original_filename)[1].lower()
         safe_filename = f"{uuid.uuid4().hex[:8]}{ext}"
-        file_path = os.path.join(files_dir, safe_filename)
         
-        # Save the file.
-        file_storage.save(file_path)
-        
-        # Get file size.
-        file_size = os.path.getsize(file_path)
-        
-        return {
-            "original_filename": original_filename,
-            "saved_filename": safe_filename,
-            "path": file_path,
-            "size": file_size
-        }
-    
+        bucket_name = os.environ.get("GCS_BUCKET_NAME")
+        if bucket_name:
+            from google.cloud import storage
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            blob_path = f"projects/{project_id}/files/{safe_filename}"
+            blob = bucket.blob(blob_path)
+            
+            # Reset file stream and upload
+            file_storage.file.seek(0)
+            blob.upload_from_file(file_storage.file)
+            
+            file_size = blob.size or 0
+            
+            return {
+                "original_filename": original_filename,
+                "saved_filename": safe_filename,
+                "path": blob_path,
+                "size": file_size
+            }
+        else:
+            files_dir = cls._get_project_files_dir(project_id)
+            cls._ensure_project_dir(project_id)
+            file_path = os.path.join(files_dir, safe_filename)
+            
+            # Save the file.
+            import shutil
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file_storage.file, buffer)
+            file_size = os.path.getsize(file_path)
+
+            return {
+                "original_filename": original_filename,
+                "saved_filename": safe_filename,
+                "path": file_path,
+                "size": file_size
+            }
+
     @classmethod
     def save_extracted_text(cls, project_id: str, text: str) -> None:
         """Save extracted text."""
-        text_path = cls._get_project_text_path(project_id)
-        with open(text_path, 'w', encoding='utf-8') as f:
-            f.write(text)
-    
+        bucket_name = os.environ.get("GCS_BUCKET_NAME")
+        if bucket_name:
+            from google.cloud import storage
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            blob_path = f"projects/{project_id}/extracted_text.txt"
+            blob = bucket.blob(blob_path)
+            blob.upload_from_string(text, content_type="text/plain")
+        else:
+            cls._ensure_project_dir(project_id)
+            text_path = cls._get_project_text_path(project_id)
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(text)
+
     @classmethod
     def get_extracted_text(cls, project_id: str) -> Optional[str]:
         """Get extracted text."""
-        text_path = cls._get_project_text_path(project_id)
-        
-        if not os.path.exists(text_path):
+        bucket_name = os.environ.get("GCS_BUCKET_NAME")
+        if bucket_name:
+            from google.cloud import storage
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            blob_path = f"projects/{project_id}/extracted_text.txt"
+            blob = bucket.blob(blob_path)
+            if blob.exists():
+                return blob.download_as_string().decode('utf-8')
             return None
-        
-        with open(text_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    
+        else:
+            text_path = cls._get_project_text_path(project_id)
+
+            if not os.path.exists(text_path):
+                return None
+
+            with open(text_path, 'r', encoding='utf-8') as f:
+                return f.read()
+
     @classmethod
     def get_project_files(cls, project_id: str) -> List[str]:
-        """Return all file paths for a project."""
-        files_dir = cls._get_project_files_dir(project_id)
-        
-        if not os.path.exists(files_dir):
-            return []
-        
-        return [
-            os.path.join(files_dir, f) 
-            for f in os.listdir(files_dir) 
-            if os.path.isfile(os.path.join(files_dir, f))
-        ]
+        """Return local file paths for a project. Downloads from GCS if needed."""
+        bucket_name = os.environ.get("GCS_BUCKET_NAME")
+        if bucket_name:
+            from google.cloud import storage
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            
+            # Create a temporary local folder
+            local_temp_dir = os.path.join(Config.UPLOAD_FOLDER, 'temp', project_id)
+            os.makedirs(local_temp_dir, exist_ok=True)
+            
+            blobs = bucket.list_blobs(prefix=f"projects/{project_id}/files/")
+            local_paths = []
+            for blob in blobs:
+                filename = os.path.basename(blob.name)
+                if not filename:
+                    continue
+                local_path = os.path.join(local_temp_dir, filename)
+                blob.download_to_filename(local_path)
+                local_paths.append(local_path)
+                
+            return local_paths
+        else:
+            files_dir = cls._get_project_files_dir(project_id)
+
+            if not os.path.exists(files_dir):
+                return []
+
+            return [
+                os.path.join(files_dir, f)
+                for f in os.listdir(files_dir)
+                if os.path.isfile(os.path.join(files_dir, f))
+            ]

@@ -42,7 +42,8 @@
               :title="$t('history.graphBuild')"
             >◇</span>
             <span 
-              class="status-icon available" 
+              class="status-icon" 
+              :class="{ available: project.simulation_id && !project.simulation_id.startsWith('sim_pending_'), unavailable: !project.simulation_id || project.simulation_id.startsWith('sim_pending_') }"
               :title="$t('history.envSetup')"
             >◈</span>
             <span 
@@ -167,6 +168,7 @@
               <button 
                 class="modal-btn btn-simulation" 
                 @click="goToSimulation"
+                :disabled="!selectedProject.simulation_id || selectedProject.simulation_id.startsWith('sim_pending_')"
               >
                 <span class="btn-step">Step2</span>
                 <span class="btn-icon">◈</span>
@@ -438,6 +440,10 @@ const getSimulationTitle = (requirement) => {
 // 格式化 simulation_id 显示（截取前6位）
 const formatSimulationId = (simulationId) => {
   if (!simulationId) return 'SIM_UNKNOWN'
+  if (simulationId.startsWith('sim_pending_')) {
+    const projPart = simulationId.replace('sim_pending_', '')
+    return `PROJ_${projPart.replace('proj_', '').slice(0, 6).toUpperCase()}`
+  }
   const prefix = simulationId.replace('sim_', '').slice(0, 6)
   return `SIM_${prefix.toUpperCase()}`
 }
@@ -507,7 +513,7 @@ const goToProject = () => {
 
 // 导航到环境配置页面（Simulation）
 const goToSimulation = () => {
-  if (selectedProject.value?.simulation_id) {
+  if (selectedProject.value?.simulation_id && !selectedProject.value.simulation_id.startsWith('sim_pending_')) {
     router.push({
       name: 'Simulation',
       params: { simulationId: selectedProject.value.simulation_id }
@@ -536,7 +542,7 @@ const loadHistory = async () => {
       projects.value = response.data || []
     }
   } catch (error) {
-    console.error('加载历史项目失败:', error)
+    console.error('Failed to load historical projects:', error)
     projects.value = []
   } finally {
     loading.value = false

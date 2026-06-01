@@ -94,6 +94,39 @@ if (backend === "neo4j" || backend === "graphiti") {
   console.log(`[dev] GRAPH_BACKEND=${backend} - skipping Neo4j container.`);
 }
 
+function ensureInngestContainer() {
+  console.log("[dev] Ensuring Inngest Dev Server is up...");
+  const backendPort = env.FLASK_PORT || "5001";
+  if (dockerContainerExists("mirofish-inngest")) {
+    spawnSync("docker", ["start", "mirofish-inngest"], {
+      stdio: "inherit",
+    });
+  } else {
+    spawnSync(
+      "docker",
+      [
+        "run",
+        "-d",
+        "--name",
+        "mirofish-inngest",
+        "-p",
+        "8288:8288",
+        "--add-host=host.docker.internal:host-gateway",
+        "inngest/inngest:latest",
+        "inngest",
+        "dev",
+        "-u",
+        `http://host.docker.internal:${backendPort}/api/inngest`,
+        "--host",
+        "0.0.0.0",
+      ],
+      { stdio: "inherit" }
+    );
+  }
+}
+
+ensureInngestContainer();
+
 const child = spawn(
   "concurrently",
   [

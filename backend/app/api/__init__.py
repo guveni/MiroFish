@@ -1,14 +1,9 @@
 """
-API路由模块
+API Router Initialization (FastAPI Native)
 """
 
-from flask import Blueprint
+from .graph.router import router as graph_router
+from .simulation.router import router as simulation_router
+from .report.router import router as report_router
 
-graph_bp = Blueprint('graph', __name__)
-simulation_bp = Blueprint('simulation', __name__)
-report_bp = Blueprint('report', __name__)
-
-from . import graph  # noqa: E402, F401
-from . import simulation  # noqa: E402, F401
-from . import report  # noqa: E402, F401
-
+__all__ = ["graph_router", "simulation_router", "report_router"]

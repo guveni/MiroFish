@@ -180,152 +180,13 @@
             </div>
 
             <!-- Agent 配置 -->
-            <div class="config-block">
-              <div class="config-block-header">
-                <span class="config-block-title">{{ $t('step2.agentConfig') }}</span>
-                <span class="config-block-badge">{{ simulationConfig.agent_configs?.length || 0 }} {{ $t('common.items') }}</span>
-              </div>
-              <div class="agents-cards">
-                <div 
-                  v-for="agent in simulationConfig.agent_configs" 
-                  :key="agent.agent_id" 
-                  class="agent-card"
-                >
-                  <!-- 卡片头部 -->
-                  <div class="agent-card-header">
-                    <div class="agent-identity">
-                      <span class="agent-id">Agent {{ agent.agent_id }}</span>
-                      <span class="agent-name">{{ agent.entity_name }}</span>
-                    </div>
-                    <div class="agent-tags">
-                      <span class="agent-type">{{ agent.entity_type }}</span>
-                      <span class="agent-stance" :class="'stance-' + agent.stance">{{ agent.stance }}</span>
-                    </div>
-                  </div>
-                  
-                  <!-- 活跃时间轴 -->
-                  <div class="agent-timeline">
-                    <span class="timeline-label">{{ $t('step2.activeTimePeriod') }}</span>
-                    <div class="mini-timeline">
-                      <div 
-                        v-for="hour in 24" 
-                        :key="hour - 1" 
-                        class="timeline-hour"
-                        :class="{ 'active': agent.active_hours?.includes(hour - 1) }"
-                        :title="`${hour - 1}:00`"
-                      ></div>
-                    </div>
-                    <div class="timeline-marks">
-                      <span>0</span>
-                      <span>6</span>
-                      <span>12</span>
-                      <span>18</span>
-                      <span>24</span>
-                    </div>
-                  </div>
-
-                  <!-- 行为参数 -->
-                  <div class="agent-params">
-                    <div class="param-group">
-                      <div class="param-item">
-                        <span class="param-label">{{ $t('step2.postsPerHour') }}</span>
-                        <span class="param-value">{{ agent.posts_per_hour }}</span>
-                      </div>
-                      <div class="param-item">
-                        <span class="param-label">{{ $t('step2.commentsPerHour') }}</span>
-                        <span class="param-value">{{ agent.comments_per_hour }}</span>
-                      </div>
-                      <div class="param-item">
-                        <span class="param-label">{{ $t('step2.responseDelay') }}</span>
-                        <span class="param-value">{{ agent.response_delay_min }}-{{ agent.response_delay_max }}min</span>
-                      </div>
-                    </div>
-                    <div class="param-group">
-                      <div class="param-item">
-                        <span class="param-label">{{ $t('step2.activityLevel') }}</span>
-                        <span class="param-value with-bar">
-                          <span class="mini-bar" :style="{ width: (agent.activity_level * 100) + '%' }"></span>
-                          {{ (agent.activity_level * 100).toFixed(0) }}%
-                        </span>
-                      </div>
-                      <div class="param-item">
-                        <span class="param-label">{{ $t('step2.sentimentBias') }}</span>
-                        <span class="param-value" :class="agent.sentiment_bias > 0 ? 'positive' : agent.sentiment_bias < 0 ? 'negative' : 'neutral'">
-                          {{ agent.sentiment_bias > 0 ? '+' : '' }}{{ agent.sentiment_bias?.toFixed(1) }}
-                        </span>
-                      </div>
-                      <div class="param-item">
-                        <span class="param-label">{{ $t('step2.influenceWeight') }}</span>
-                        <span class="param-value highlight">{{ agent.influence_weight?.toFixed(1) }}</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <AgentConfigurator :agent-configs="simulationConfig.agent_configs" />
 
             <!-- 平台配置 -->
-            <div class="config-block">
-              <div class="config-block-header">
-                <span class="config-block-title">{{ $t('step2.recommendAlgoConfig') }}</span>
-              </div>
-              <div class="platforms-grid">
-                <div v-if="simulationConfig.twitter_config" class="platform-card">
-                  <div class="platform-card-header">
-                    <span class="platform-name">{{ $t('step2.platform1Name') }}</span>
-                  </div>
-                  <div class="platform-params">
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.recencyWeight') }}</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.recency_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.popularityWeight') }}</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.popularity_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.relevanceWeight') }}</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.relevance_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.viralThreshold') }}</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.viral_threshold }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.echoChamberStrength') }}</span>
-                      <span class="param-value">{{ simulationConfig.twitter_config.echo_chamber_strength }}</span>
-                    </div>
-                  </div>
-                </div>
-                <div v-if="simulationConfig.reddit_config" class="platform-card">
-                  <div class="platform-card-header">
-                    <span class="platform-name">{{ $t('step2.platform2Name') }}</span>
-                  </div>
-                  <div class="platform-params">
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.recencyWeight') }}</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.recency_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.popularityWeight') }}</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.popularity_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.relevanceWeight') }}</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.relevance_weight }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.viralThreshold') }}</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.viral_threshold }}</span>
-                    </div>
-                    <div class="param-row">
-                      <span class="param-label">{{ $t('step2.echoChamberStrength') }}</span>
-                      <span class="param-value">{{ simulationConfig.reddit_config.echo_chamber_strength }}</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <PlatformSettings
+              :twitter-config="simulationConfig.twitter_config"
+              :reddit-config="simulationConfig.reddit_config"
+            />
 
             <!-- LLM 配置推理 -->
             <div v-if="simulationConfig.generation_reasoning" class="config-block">
@@ -642,6 +503,10 @@ import {
   getSimulationConfigRealtime
 } from '../api/simulation'
 import { usePipelineAutopilot } from '../composables/usePipelineAutopilot'
+
+// Sub-components
+import AgentConfigurator from './AgentConfigurator.vue'
+import PlatformSettings from './PlatformSettings.vue'
 
 const { t } = useI18n()
 const { options: runOptions, shouldAdvance, markAdvanced } = usePipelineAutopilot()

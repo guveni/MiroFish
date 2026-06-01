@@ -64,6 +64,10 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY', 'mirofish-secret-key')
     DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
     
+    # Database settings
+    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or os.environ.get('SQLALCHEMY_DATABASE_URI') or 'sqlite:///' + os.path.join(os.path.dirname(__file__), '../mirofish.db')
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+    
     # JSON settings. Keep Unicode readable instead of escaping it as \uXXXX.
     JSON_AS_ASCII = False
     
@@ -194,6 +198,9 @@ class Config:
     REPORT_AGENT_MAX_TOOL_CALLS = int(os.environ.get('REPORT_AGENT_MAX_TOOL_CALLS', '5'))
     REPORT_AGENT_MAX_REFLECTION_ROUNDS = int(os.environ.get('REPORT_AGENT_MAX_REFLECTION_ROUNDS', '2'))
     REPORT_AGENT_TEMPERATURE = float(os.environ.get('REPORT_AGENT_TEMPERATURE', '0.5'))
+    
+    # Distributed Worker settings
+    SIMULATION_DISTRIBUTED_WORKERS = os.environ.get('SIMULATION_DISTRIBUTED_WORKERS', 'True').lower() == 'true'
 
     # Pipeline step retries: one initial attempt plus PIPELINE_STEP_MAX_RETRIES retries.
     PIPELINE_STEP_MAX_RETRIES = int(os.environ.get('PIPELINE_STEP_MAX_RETRIES', '2'))

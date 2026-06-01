@@ -34,6 +34,24 @@ export const getConsoleLog = (reportId, fromLine = 0) => {
   return service.get(`/api/report/${reportId}/console-log`, { params: { from_line: fromLine } })
 }
 
+export const getReportSections = (reportId) => {
+  return service.get(`/api/report/${reportId}/sections`)
+}
+
+/**
+ * Build WebSocket URL for report log streaming.
+ * @param {string} path - WebSocket path
+ */
+export const getWebSocketUrl = (path) => {
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5001'
+  if (!apiBaseUrl || apiBaseUrl === '/' || (apiBaseUrl.startsWith('/') && !apiBaseUrl.startsWith('//'))) {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    return `${protocol}//${window.location.host}${path}`
+  }
+  const base = apiBaseUrl.replace(/^http/, 'ws')
+  return `${base}${path}`
+}
+
 /**
  * 获取报告详情
  * @param {string} reportId

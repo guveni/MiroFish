@@ -467,7 +467,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { generateOntology, getProject, buildGraph, getTaskStatus, getGraphData } from '../api/graph'
-import { getPendingUpload, clearPendingUpload } from '../store/pendingUpload'
+import { getPendingUpload, clearPendingUpload, getRunOptions } from '../store/pendingUpload'
 import * as d3 from 'd3'
 
 const route = useRoute()
@@ -584,6 +584,16 @@ const goToNextStep = () => {
 
 const retryOntology = async () => {
   if (!currentProjectId.value || currentProjectId.value === 'new') return
+
+  const hasStoredFiles = (projectData.value?.files?.length ?? 0) > 0
+  const runOptions = getRunOptions()
+  if (!hasStoredFiles && !runOptions.useVertexSearch) {
+    ontologyError.value =
+      'This project has no saved documents. Go to Home, upload PDF/TXT/MD files (or enable Gemini web search), and start a new run.'
+    error.value = ontologyError.value
+    return
+  }
+
   stopOntologyPolling()
   ontologyError.value = ''
   error.value = ''
@@ -593,6 +603,7 @@ const retryOntology = async () => {
   const formData = new FormData()
   formData.append('simulation_requirement', projectData.value?.simulation_requirement || '')
   formData.append('project_id', currentProjectId.value)
+  formData.append('use_vertex_search', runOptions.useVertexSearch ? 'true' : 'false')
   try {
     const response = await generateOntology(formData)
     if (response.success && response.data?.task_id) {

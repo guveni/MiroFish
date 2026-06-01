@@ -1,4 +1,4 @@
-"""MiroFish Backend Entrypoint"""
+"""MiroFish Backend Entrypoint using FastAPI and Uvicorn"""
 
 import os
 import sys
@@ -19,6 +19,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from app import create_app
 from app.config import Config
 
+# Create global app instance for ASGI servers (Uvicorn, etc.)
+app = create_app()
+
 
 def main():
     """Main function"""
@@ -31,24 +34,20 @@ def main():
         print("\n请检查 .env 文件中的配置")
         sys.exit(1)
     
-    # Create the app
-    app = create_app()
-    
     # Get run configuration
     host = os.environ.get('FLASK_HOST', '0.0.0.0')
     port = int(os.environ.get('FLASK_PORT', 5001))
     debug = Config.DEBUG
     
-    # Start the service
-    app.run(
+    # Start the service with Uvicorn
+    import uvicorn
+    uvicorn.run(
+        "run:app", 
         host=host, 
         port=port, 
-        debug=debug, 
-        threaded=True, 
-        exclude_patterns=["*/uploads/*", "*/logs/*", "*.log"]
+        reload=debug
     )
 
 
 if __name__ == '__main__':
     main()
-
