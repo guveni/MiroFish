@@ -51,6 +51,22 @@ setup-all: setup setup-backend
 
 up:
 	docker compose up --build -d
+	@echo ""
+	@echo "========================================================================"
+	@echo "  MiroFish Services Started Successfully!"
+	@echo "========================================================================"
+	@echo "  Access the components of your stack using the local links below:"
+	@echo ""
+	@echo "  - Vue 3 Frontend       : http://localhost:3000"
+	@echo "  - Flask Backend API    : http://localhost:5001"
+	@echo "  - Inngest Dev Server   : http://localhost:8288"
+	@echo "  - Neo4j Graph Browser  : http://localhost:7474"
+	@echo "  - Postgres Database    : localhost:5432 (mirofish / mirofish)"
+	@echo ""
+	@echo "  To view logs, run      : make logs"
+	@echo "  To stop services, run  : make down"
+	@echo "========================================================================"
+	@echo ""
 
 down:
 	docker compose down
