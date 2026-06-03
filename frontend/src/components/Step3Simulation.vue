@@ -2,6 +2,37 @@
   <div class="simulation-panel">
     <!-- Top Control Bar -->
     <div class="control-bar">
+      <div class="runner-controls">
+        <div class="runner-status-block" :class="runnerStatusClass">
+          <span class="runner-status-dot"></span>
+          <div class="runner-status-text">
+            <span class="runner-status-label">{{ $t('step3.runnerStatusTitle') }}</span>
+            <span class="runner-status-value">{{ runnerStatusLabel }}</span>
+          </div>
+        </div>
+        <div class="runner-buttons">
+          <button
+            type="button"
+            class="action-btn start"
+            :disabled="!canStartSimulation"
+            @click="handleStartSimulation"
+          >
+            <span v-if="isStarting" class="loading-spinner-small"></span>
+            {{ isStarting ? $t('step3.statusStarting') : $t('step3.startSimulationBtn') }}
+          </button>
+          <button
+            type="button"
+            class="action-btn stop"
+            :disabled="!canStopSimulation"
+            @click="handleStopSimulation"
+          >
+            <span v-if="isStopping" class="loading-spinner-small"></span>
+            {{ isStopping ? $t('step3.statusStopping') : $t('step3.stopSimulationBtn') }}
+          </button>
+        </div>
+        <p v-if="startError" class="start-error">{{ startError }}</p>
+      </div>
+
       <div class="status-group">
         <!-- Twitter Platform Progress -->
         <div class="platform-status twitter" :class="{ active: runStatus.twitter_running, completed: runStatus.twitter_completed }">
@@ -263,8 +294,8 @@
         </TransitionGroup>
 
         <div v-if="allActions.length === 0" class="waiting-state">
-          <div class="pulse-ring"></div>
-          <span>Waiting for agent actions...</span>
+          <div class="pulse-ring" :class="{ inactive: !isRunnerActive }"></div>
+          <span>{{ waitingMessage }}</span>
         </div>
       </div>
     </div>
@@ -345,7 +376,9 @@ const scrollContainer = ref(null)
 // Computed
 // Display actions in chronological order (latest at the bottom)
 const chronologicalActions = computed(() => {
-  return allActions.value
+  return [...allActions.value].sort((a, b) => {
+    return new Date(a.timestamp) - new Date(b.timestamp)
+  })
 })
 
 // Action count for each platform
@@ -376,6 +409,52 @@ const redditElapsedTime = computed(() => {
   return formatElapsedTime(runStatus.value.reddit_current_round || 0)
 })
 
+const effectiveRunnerStatus = computed(() => {
+  return runStatus.value?.runner_status || 'idle'
+})
+
+const isRunnerActive = computed(() => {
+  return ['running', 'starting', 'stopping'].includes(effectiveRunnerStatus.value)
+})
+
+const runnerStatusLabel = computed(() => {
+  const keyMap = {
+    running: 'step3.statusRunning',
+    starting: 'step3.statusStarting',
+    stopping: 'step3.statusStopping',
+    stopped: 'step3.statusStopped',
+    completed: 'step3.statusCompleted',
+    failed: 'step3.statusFailed',
+    paused: 'step3.statusPaused',
+    idle: 'step3.statusIdle'
+  }
+  return t(keyMap[effectiveRunnerStatus.value] || 'step3.statusIdle')
+})
+
+const runnerStatusClass = computed(() => {
+  const status = effectiveRunnerStatus.value
+  if (['running', 'starting'].includes(status)) return 'is-running'
+  if (status === 'stopping') return 'is-stopping'
+  if (status === 'completed') return 'is-completed'
+  if (status === 'failed') return 'is-failed'
+  if (status === 'stopped' || status === 'paused') return 'is-stopped'
+  return 'is-idle'
+})
+
+const canStartSimulation = computed(() => {
+  return Boolean(props.simulationId) && !isStarting.value && !isRunnerActive.value
+})
+
+const canStopSimulation = computed(() => {
+  return Boolean(props.simulationId) && !isStopping.value && isRunnerActive.value
+})
+
+const waitingMessage = computed(() => {
+  if (isRunnerActive.value) return t('step3.waitingForActions')
+  if (effectiveRunnerStatus.value === 'stopped') return t('step3.useStartToRun')
+  return t('step3.useStartToRun')
+})
+
 // Methods
 const addLog = (msg) => {
   emit('add-log', msg)
@@ -395,6 +474,48 @@ const resetAllState = () => {
   stopPolling()  // Stop any existing polling
 }
 
+const emitRunnerStatus = (status) => {
+  if (status === 'running' || status === 'starting' || status === 'stopping') {
+    emit('update-status', 'processing')
+  } else if (status === 'completed') {
+    emit('update-status', 'completed')
+  } else if (status === 'failed') {
+    emit('update-status', 'error')
+  } else {
+    emit('update-status', 'stopped')
+  }
+}
+
+const applyRunStateFromServer = (data, { startPolling = false } = {}) => {
+  if (!data) return
+
+  runStatus.value = data
+  const status = data.runner_status || 'idle'
+
+  if (['running', 'starting', 'stopping'].includes(status)) {
+    phase.value = 1
+    emitRunnerStatus(status)
+    if (startPolling) {
+      startStatusPolling()
+      startDetailPolling()
+    }
+    return
+  }
+
+  if (status === 'completed' || checkPlatformsCompleted(data)) {
+    phase.value = 2
+    emitRunnerStatus('completed')
+    return
+  }
+
+  phase.value = 0
+  emitRunnerStatus(status === 'failed' ? 'failed' : 'stopped')
+}
+
+const handleStartSimulation = () => {
+  doStartSimulation()
+}
+
 // Start the simulation
 const doStartSimulation = async () => {
   if (!props.simulationId) {
@@ -402,7 +523,9 @@ const doStartSimulation = async () => {
     return
   }
 
-  // First reset all states to ensure no interference from previous simulation
+  if (!canStartSimulation.value) return
+
+  // Reset UI state before a fresh or forced restart
   resetAllState()
   
   isStarting.value = true
@@ -418,8 +541,14 @@ const doStartSimulation = async () => {
       enable_graph_memory_update: runOptions.enableGraphMemoryUpdate  // Enable dynamic graph memory update
     }
     
-    if (props.maxRounds || runOptions.maxRounds != null) {
-      params.max_rounds = props.maxRounds || runOptions.maxRounds
+    if (props.maxRounds !== null && props.maxRounds !== undefined) {
+      params.max_rounds = props.maxRounds
+      addLog(t('log.setMaxRounds', { rounds: params.max_rounds }))
+    } else if (props.maxRounds === null) {
+      // Explicitly chosen auto, do not send max_rounds
+    } else if (runOptions.maxRounds != null) {
+      // Fallback only if props.maxRounds was not provided/passed
+      params.max_rounds = runOptions.maxRounds
       addLog(t('log.setMaxRounds', { rounds: params.max_rounds }))
     }
     
@@ -434,11 +563,7 @@ const doStartSimulation = async () => {
       addLog(t('log.engineStarted'))
       addLog(`  ├─ PID: ${res.data.process_pid || '-'}`)
       
-      phase.value = 1
-      runStatus.value = res.data
-      
-      startStatusPolling()
-      startDetailPolling()
+      applyRunStateFromServer(res.data, { startPolling: true })
     } else {
       startError.value = res.error || 'Start failed'
       addLog(t('log.startFailed', { error: res.error || t('common.unknownError') }))
@@ -453,7 +578,7 @@ const doStartSimulation = async () => {
   }
 }
 
-const resumeOrStart = async () => {
+const syncRunStateOnMount = async () => {
   if (!props.simulationId) {
     addLog(t('log.errorMissingSimId'))
     return
@@ -462,37 +587,31 @@ const resumeOrStart = async () => {
   try {
     const res = await getRunStatus(props.simulationId)
     if (res.success && res.data) {
-      const status = res.data.runner_status
+      const status = res.data.runner_status || 'idle'
+      prevTwitterRound.value = res.data.twitter_current_round || 0
+      prevRedditRound.value = res.data.reddit_current_round || 0
+      await fetchRunStatusDetail()
 
-      if (status === 'running') {
-        addLog('Reconnecting to running simulation...')
-        runStatus.value = res.data
-        phase.value = 1
-        emit('update-status', 'processing')
-        prevTwitterRound.value = res.data.twitter_current_round || 0
-        prevRedditRound.value = res.data.reddit_current_round || 0
-        await fetchRunStatusDetail()
-        startStatusPolling()
-        startDetailPolling()
+      if (['running', 'starting', 'stopping'].includes(status)) {
+        addLog(t('step3.reconnectingActive'))
+        applyRunStateFromServer(res.data, { startPolling: true })
         return
       }
 
-      if (status === 'completed' || status === 'stopped') {
-        addLog('Loading completed simulation results...')
-        runStatus.value = res.data
-        phase.value = 2
-        emit('update-status', 'completed')
-        prevTwitterRound.value = res.data.twitter_current_round || 0
-        prevRedditRound.value = res.data.reddit_current_round || 0
-        await fetchRunStatusDetail()
-        return
+      applyRunStateFromServer(res.data)
+      addLog(t('step3.loadedRunState'))
+      if (phase.value === 0) {
+        addLog(t('step3.useStartToRun'))
       }
+      return
     }
   } catch (err) {
-    addLog(`Status check failed, starting fresh: ${err.message}`)
+    addLog(`Status check failed: ${err.message}`)
   }
 
-  doStartSimulation()
+  phase.value = 0
+  emitRunnerStatus('idle')
+  addLog(t('step3.useStartToRun'))
 }
 
 // Stop the simulation
@@ -507,9 +626,15 @@ const handleStopSimulation = async () => {
     
     if (res.success) {
       addLog(t('log.simStoppedSuccess'))
-      phase.value = 2
       stopPolling()
-      emit('update-status', 'completed')
+      const statusRes = await getRunStatus(props.simulationId)
+      if (statusRes.success && statusRes.data) {
+        applyRunStateFromServer(statusRes.data)
+      } else {
+        phase.value = 0
+        runStatus.value = { ...runStatus.value, runner_status: 'stopped' }
+        emitRunnerStatus('stopped')
+      }
     } else {
       addLog(t('log.stopFailed', { error: res.error || t('common.unknownError') }))
     }
@@ -569,21 +694,22 @@ const fetchRunStatus = async () => {
         prevRedditRound.value = data.reddit_current_round
       }
       
-      // Check if simulation is completed (determined by runner_status or platform completion status)
-      const isCompleted = data.runner_status === 'completed' || data.runner_status === 'stopped'
-      
-      // Extra check: if backend hasn't updated runner_status yet, but platforms report completed
-      // Determined by detecting twitter_completed and reddit_completed states
+      if (data.runner_status === 'stopped' || data.runner_status === 'failed') {
+        stopPolling()
+        applyRunStateFromServer(data)
+        return
+      }
+
+      const runnerCompleted = data.runner_status === 'completed'
       const platformsCompleted = checkPlatformsCompleted(data)
-      
-      if (isCompleted || platformsCompleted) {
-        if (platformsCompleted && !isCompleted) {
+
+      if (runnerCompleted || platformsCompleted) {
+        if (platformsCompleted && !runnerCompleted) {
           addLog(t('log.allPlatformsCompleted'))
         }
         addLog(t('log.simCompleted'))
-        phase.value = 2
         stopPolling()
-        emit('update-status', 'completed')
+        applyRunStateFromServer(data)
       }
     }
   } catch (err) {
@@ -769,7 +895,7 @@ watch(isMonitorCollapsed, (newVal) => {
 onMounted(() => {
   addLog(t('log.step3Init'))
   if (props.simulationId) {
-    resumeOrStart()
+    syncRunStateOnMount()
   }
 })
 
@@ -791,18 +917,108 @@ onUnmounted(() => {
 /* --- Control Bar --- */
 .control-bar {
   background: #FFF;
-  padding: 12px 24px;
+  padding: 12px 16px 12px 24px;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 16px;
   border-bottom: 1px solid #EAEAEA;
   z-index: 10;
-  height: 64px;
+  min-height: 72px;
+  flex-wrap: wrap;
+}
+
+.runner-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.runner-status-block {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #EAEAEA;
+  background: #FAFAFA;
+  min-width: 160px;
+}
+
+.runner-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #BDBDBD;
+  flex-shrink: 0;
+}
+
+.runner-status-block.is-running .runner-status-dot,
+.runner-status-block.is-stopping .runner-status-dot {
+  background: #FF5722;
+  animation: runner-pulse 1s infinite;
+}
+
+.runner-status-block.is-stopped .runner-status-dot {
+  background: #9E9E9E;
+}
+
+.runner-status-block.is-completed .runner-status-dot {
+  background: #1A936F;
+}
+
+.runner-status-block.is-failed .runner-status-dot {
+  background: #F44336;
+}
+
+.runner-status-block.is-idle .runner-status-dot {
+  background: #BDBDBD;
+}
+
+.runner-status-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.runner-status-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.runner-status-value {
+  font-size: 14px;
+  font-weight: 700;
+  color: #000;
+  letter-spacing: 0.02em;
+}
+
+.runner-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.start-error {
+  margin: 0;
+  font-size: 11px;
+  color: #C62828;
+  max-width: 220px;
+}
+
+@keyframes runner-pulse {
+  50% { opacity: 0.45; }
 }
 
 .status-group {
   display: flex;
   gap: 12px;
+  flex: 1;
+  justify-content: center;
+  flex-wrap: wrap;
 }
 
 /* Platform Status Cards */
@@ -975,9 +1191,53 @@ onUnmounted(() => {
   background: #333;
 }
 
+.action-btn.start {
+  background: #000;
+  color: #FFF;
+}
+
+.action-btn.start:hover:not(:disabled) {
+  background: #333;
+}
+
+.action-btn.stop {
+  background: #FFF;
+  color: #000;
+  border: 1px solid #000;
+}
+
+.action-btn.stop:hover:not(:disabled) {
+  background: #F5F5F5;
+}
+
 .action-btn:disabled {
-  opacity: 0.3;
+  opacity: 0.35;
   cursor: not-allowed;
+}
+
+.loading-spinner-small {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  margin-right: 4px;
+}
+
+.action-btn.stop .loading-spinner-small {
+  border-color: rgba(0, 0, 0, 0.15);
+  border-top-color: #000;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.pulse-ring.inactive {
+  animation: none;
+  opacity: 0.35;
 }
 
 /* --- Main Content Area --- */
@@ -1369,16 +1629,4 @@ onUnmounted(() => {
 .log-time { color: #555; min-width: 75px; }
 .log-msg { color: #BBB; word-break: break-all; }
 .mono { font-family: 'JetBrains Mono', monospace; }
-
-/* Loading spinner for button */
-.loading-spinner-small {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.3);
-  border-top-color: #FFF;
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-  margin-right: 6px;
-}
 </style>

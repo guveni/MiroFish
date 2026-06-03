@@ -88,6 +88,14 @@ export function useAgentLogs() {
     return toolConfig[toolName]?.icon || 'tool'
   }
 
+  /** Single-line field values only; avoids capturing markdown headings on the next line. */
+  const extractLineValue = (text, pattern) => {
+    const match = text.match(pattern)
+    if (!match) return ''
+    const value = match[1].trim()
+    return value.startsWith('#') ? '' : value
+  }
+
   // Parse helper functions
   const parseInsightForge = (text) => {
     const result = {
@@ -101,11 +109,8 @@ export function useAgentLogs() {
     }
     
     try {
-      const queryMatch = text.match(/(?:分析问题|Analysis query):\s*(.+?)(?:\n|$)/i)
-      if (queryMatch) result.query = queryMatch[1].trim()
-      
-      const reqMatch = text.match(/(?:预测场景|Prediction scenario):\s*(.+?)(?:\n|$)/i)
-      if (reqMatch) result.simulationRequirement = reqMatch[1].trim()
+      result.query = extractLineValue(text, /(?:分析问题|Analysis query):\s*([^\n]+)/i)
+      result.simulationRequirement = extractLineValue(text, /(?:预测场景|Prediction scenario):\s*([^\n]+)/i)
       
       const factMatch = text.match(/(?:相关预测事实|Relevant prediction facts):\s*(\d+)/i)
       const entityMatch = text.match(/(?:涉及Entities|Involved entities):\s*(\d+)/i)
@@ -172,47 +177,50 @@ export function useAgentLogs() {
       historicalFacts: [],
       entities: []
     }
-    
+
     try {
-      const queryMatch = text.match(/(?:查询|Query):\s*(.+?)(?:\n|$)/i)
-      if (queryMatch) result.query = queryMatch[1].trim()
-      
-      const nodeMatch = text.match(/(?:返回Nodes数|Nodes returned):\s*(\d+)/i)
-      const edgeMatch = text.match(/(?:Edges数|Edges returned):\s*(\d+)/i)
-      const activeMatch = text.match(/(?:有效预测事实数|Active facts count):\s*(\d+)/i)
-      const histMatch = text.match(/(?:历史演变事实数|Historical facts count):\s*(\d+)/i)
-      if (nodeMatch) result.stats.nodes = parseInt(nodeMatch[1])
-      if (edgeMatch) result.stats.edges = parseInt(edgeMatch[1])
-      if (activeMatch) result.stats.activeFacts = parseInt(activeMatch[1])
-      if (histMatch) result.stats.historicalFacts = parseInt(histMatch[1])
-      
-      const activeSection = text.match(/### (?:有效预测事实|Active simulation facts):\n([\s\S]*?)(?=\n###|$)/i)
+      result.query = extractLineValue(text, /(?:查询|Query):\s*([^\n]+)/i)
+
+      const nodesMatch = text.match(/(?:总节点数|Total nodes):\s*(\d+)/i)
+      const edgesMatch = text.match(/(?:总边数|Total edges):\s*(\d+)/i)
+      const activeMatch = text.match(/(?:当前有效事实|Current valid facts):\s*(\d+)/i)
+      const histMatch = text.match(/(?:历史\/过期事实|Historical\/expired facts):\s*(\d+)/i)
+      if (nodesMatch) result.stats.nodes = parseInt(nodesMatch[1], 10)
+      if (edgesMatch) result.stats.edges = parseInt(edgesMatch[1], 10)
+      if (activeMatch) result.stats.activeFacts = parseInt(activeMatch[1], 10)
+      if (histMatch) result.stats.historicalFacts = parseInt(histMatch[1], 10)
+
+      const activeSection = text.match(/### (?:【当前有效事实】|\[Current Valid Facts\])[\s\S]*?\n([\s\S]*?)(?=\n###|$)/i)
       if (activeSection) {
         const lines = activeSection[1].split('\n').filter(l => l.match(/^\d+\./))
-        result.activeFacts = lines.map(l => l.replace(/^\d+\.\s*/, '').trim()).filter(Boolean)
+        result.activeFacts = lines.map(l => {
+          const factText = l.replace(/^\d+\.\s*/, '').replace(/^"|"$/g, '').trim()
+          return factText
+        }).filter(Boolean)
       }
-      
-      const histSection = text.match(/### (?:历史演变 facts|Historical evolution facts):\n([\s\S]*?)(?=\n###|$)/i)
+
+      const histSection = text.match(/### (?:【历史\/过期事实】|\[Historical\/Expired Facts\])[\s\S]*?\n([\s\S]*?)(?=\n###|$)/i)
       if (histSection) {
         const lines = histSection[1].split('\n').filter(l => l.match(/^\d+\./))
-        result.historicalFacts = lines.map(l => l.replace(/^\d+\.\s*/, '').trim()).filter(Boolean)
+        result.historicalFacts = lines.map(l => {
+          const factText = l.replace(/^\d+\.\s*/, '').replace(/^"|"$/g, '').trim()
+          return factText
+        }).filter(Boolean)
       }
-      
-      const entitiesSection = text.match(/### (?:涉及的 Entities|Involved entities):\n([\s\S]*?)(?=\n###|$)/i)
-      if (entitiesSection) {
-        const lines = entitiesSection[1].split('\n').filter(l => l.trim().startsWith('-'))
+
+      const entitySection = text.match(/### (?:【涉及Entities】|\[Involved Entities\])\n([\s\S]*?)(?=\n###|$)/i)
+      if (entitySection) {
+        const lines = entitySection[1].split('\n').filter(l => l.trim().startsWith('-'))
         result.entities = lines.map(l => {
           const match = l.match(/^-\s*\*\*(.+?)\*\*\s*\((.+?)\)/)
           if (match) return { name: match[1].trim(), type: match[2].trim() }
-          const simpleMatch = l.match(/^-\s*(.+)$/)
-          if (simpleMatch) return { name: simpleMatch[1].trim(), type: '' }
           return null
         }).filter(Boolean)
       }
     } catch (e) {
       console.warn('Parse panorama_search failed:', e)
     }
-    
+
     return result
   }
 
@@ -226,8 +234,7 @@ export function useAgentLogs() {
     }
     
     try {
-      const queryMatch = text.match(/(?:搜索查询|Search query):\s*(.+?)(?:\n|$)/i)
-      if (queryMatch) result.query = queryMatch[1].trim()
+      result.query = extractLineValue(text, /(?:搜索查询|Search query):\s*([^\n]+)/i)
       
       const countMatch = text.match(/(?:找到|Found)\s*(\d+)\s*(?:条|relevant)/i)
       if (countMatch) result.count = parseInt(countMatch[1])
@@ -269,66 +276,206 @@ export function useAgentLogs() {
   }
 
   const parseInterviewAgents = (text) => {
-    const result = {
-      topic: '',
-      platforms: [],
-      stats: { agentsCount: 0, repliesCount: 0, platformsCount: 0 },
-      transcripts: []
-    }
-    
-    try {
-      const topicMatch = text.match(/(?:采访主题|Interview topic):\s*(.+?)(?:\n|$)/i)
-      if (topicMatch) result.topic = topicMatch[1].trim()
-      
-      const platformMatch = text.match(/(?:采访平台|Platforms):\s*(.+?)(?:\n|$)/i)
-      if (platformMatch) {
-        result.platforms = platformMatch[1].split(',').map(p => p.trim())
-        result.stats.platformsCount = result.platforms.length
-      }
-      
-      const agentsCountMatch = text.match(/(?:采访Agents数|Agents interviewed):\s*(\d+)/i)
-      if (agentsCountMatch) result.stats.agentsCount = parseInt(agentsCountMatch[1])
-      
-      const repliesCountMatch = text.match(/(?:采访回复数|Total replies collected):\s*(\d+)/i)
-      if (repliesCountMatch) result.stats.repliesCount = parseInt(repliesCountMatch[1])
-      
-      const transSection = text.match(/### (?:采访实录|Interview Transcripts):\n([\s\S]*)$/i)
-      if (transSection) {
-        const transText = transSection[1]
-        const agentBlocks = transText.split(/\n(?=- Agent \d+:)/).filter(b => b.trim().startsWith('- Agent '))
-        result.transcripts = agentBlocks.map(block => {
-          const titleMatch = block.match(/^-\s*Agent\s*(\d+):\s*(.+?)\s*\((.+?)\)/)
-          const lines = block.split('\n')
-          const qas = []
-          let currentQa = null
-          
-          lines.forEach(line => {
-            const platformLabelMatch = line.match(/^\s*(Twitter|Reddit):\s*$/i)
-            if (platformLabelMatch) {
-              if (currentQa) qas.push(currentQa)
-              currentQa = { platform: platformLabelMatch[1], content: '' }
-            } else if (currentQa) {
-              if (line.trim().startsWith('>')) {
-                currentQa.content += (currentQa.content ? '\n' : '') + line.replace(/^\s*>\s*/, '').trim()
-              }
-            }
-          })
-          if (currentQa) qas.push(currentQa)
-          
-          return {
-            agentId: titleMatch ? parseInt(titleMatch[1]) : 0,
-            name: titleMatch ? titleMatch[2].trim() : '',
-            platform: titleMatch ? titleMatch[3].trim() : '',
-            qas: qas
-          }
-        }).filter(t => t.name)
-      }
-    } catch (e) {
-      console.warn('Parse interview_agents failed:', e)
-    }
-    
-    return result
+  const result = {
+    topic: '',
+    agentCount: '',
+    successCount: 0,
+    totalCount: 0,
+    selectionReason: '',
+    interviews: [],
+    summary: ''
   }
+  
+  try {
+    // Extract interview topic
+    const topicMatch = text.match(/\*\*(?:采访主题|Interview Topic):\*\*\s*(.+?)(?:\n|$)/i)
+    if (topicMatch) result.topic = topicMatch[1].trim()
+    
+    // Extract interview count
+    const countMatch = text.match(/\*\*(?:采访人数|Interview Count):\*\*\s*(\d+)\s*\/\s*(\d+)/i)
+    if (countMatch) {
+      result.successCount = parseInt(countMatch[1])
+      result.totalCount = parseInt(countMatch[2])
+      result.agentCount = `${countMatch[1]} / ${countMatch[2]}`
+    }
+    
+    // Extract reasoning for selecting interview subjects
+    const reasonMatch = text.match(/### (?:采访对象选择理由|Selection Reasoning)\n([\s\S]*?)(?=\n---\n|\n### 采访实录|\n### Interview Transcript)/i)
+    if (reasonMatch) {
+      result.selectionReason = reasonMatch[1].trim()
+    }
+    
+    // Parse the selection reasoning for each person
+    const parseIndividualReasons = (reasonText) => {
+      const reasons = {}
+      if (!reasonText) return reasons
+      
+      const lines = reasonText.split(/\n+/)
+      let currentName = null
+      let currentReason = []
+      
+      for (const line of lines) {
+        let headerMatch = null
+        let name = null
+        let reasonStart = null
+        
+        // Format 1: Number. **Name (index=X)**: Reason
+        headerMatch = line.match(/^\d+\.\s*\*\*([^*（(]+)(?:[（(]index\s*=?\s*\d+[)）])?\*\*[：:]\s*(.*)/)
+        if (headerMatch) {
+          name = headerMatch[1].trim()
+          reasonStart = headerMatch[2]
+        }
+        
+        // Format 2: - Select Name (index X): Reason
+        if (!headerMatch) {
+          headerMatch = line.match(/^-\s*选择([^（(]+)(?:[（(]index\s*=?\s*\d+[)）])?[：:]\s*(.*)/)
+          if (headerMatch) {
+            name = headerMatch[1].trim()
+            reasonStart = headerMatch[2]
+          }
+        }
+        
+        // Format 3: - **Name (index X)**: Reason
+        if (!headerMatch) {
+          headerMatch = line.match(/^-\s*\*\*([^*（(]+)(?:[（(]index\s*=?\s*\d+[)）])?\*\*[：:]\s*(.*)/)
+          if (headerMatch) {
+            name = headerMatch[1].trim()
+            reasonStart = headerMatch[2]
+          }
+        }
+        
+        if (name) {
+          if (currentName && currentReason.length > 0) {
+            reasons[currentName] = currentReason.join(' ').trim()
+          }
+          currentName = name
+          currentReason = reasonStart ? [reasonStart.trim()] : []
+        } else if (currentName && line.trim() && !line.match(/^未选|^综上|^最终选择/)) {
+          currentReason.push(line.trim())
+        }
+      }
+      
+      if (currentName && currentReason.length > 0) {
+        reasons[currentName] = currentReason.join(' ').trim()
+      }
+      
+      return reasons
+    }
+    
+    const individualReasons = parseIndividualReasons(result.selectionReason)
+    
+    // Extract each interview transcript
+    const interviewBlocks = text.split(/#### (?:采访|Interview) #\d+:/i).slice(1)
+    
+    interviewBlocks.forEach((block, index) => {
+      const interview = {
+        num: index + 1,
+        title: '',
+        name: '',
+        role: '',
+        bio: '',
+        selectionReason: '',
+        questions: [],
+        twitterAnswer: '',
+        redditAnswer: '',
+        quotes: []
+      }
+      
+      // Extract title
+      const titleMatch = block.match(/^(.+?)\n/)
+      if (titleMatch) interview.title = titleMatch[1].trim()
+      
+      // Extract name and role
+      const nameRoleMatch = block.match(/\*\*(.+?)\*\*\s*\((.+?)\)/)
+      if (nameRoleMatch) {
+        interview.name = nameRoleMatch[1].trim()
+        interview.role = nameRoleMatch[2].trim()
+        interview.selectionReason = individualReasons[interview.name] || ''
+      }
+      
+      // Extract bio
+      const bioMatch = block.match(/_(?:简介|Bio):\s*([\s\S]*?)_\n/i)
+      if (bioMatch) {
+        interview.bio = bioMatch[1].trim().replace(/\.\.\.$/, '...')
+      }
+      
+      // Extract question list
+      const qMatch = block.match(/\*\*Q:\*\*\s*([\s\S]*?)(?=\n\n\*\*A:\*\*|\*\*A:\*\*)/)
+      if (qMatch) {
+        const qText = qMatch[1].trim()
+        const questions = qText.split(/\n\d+\.\s+/).filter(q => q.trim())
+        if (questions.length > 0) {
+          const firstQ = qText.match(/^1\.\s+(.+)/)
+          if (firstQ) {
+            interview.questions = [firstQ[1].trim(), ...questions.slice(1).map(q => q.trim())]
+          } else {
+            interview.questions = questions.map(q => q.trim())
+          }
+        }
+      }
+      
+      // Extract answers - split into Twitter and Reddit
+      const answerMatch = block.match(/\*\*A:\*\*\s*([\s\S]*?)(?=\*\*(?:关键引言|Key Quotes)|$)/i)
+      if (answerMatch) {
+        const answerText = answerMatch[1].trim()
+        
+        // Separate Twitter and Reddit answers
+        const twitterMatch = answerText.match(/(?:【Twitter平台回答】|\[Twitter Platform Response\])\n?([\s\S]*?)(?=(?:【Reddit平台回答】|\[Reddit Platform Response\])|$)/i)
+        const redditMatch = answerText.match(/(?:【Reddit平台回答】|\[Reddit Platform Response\])\n?([\s\S]*?)$/i)
+        
+        if (twitterMatch) {
+          interview.twitterAnswer = twitterMatch[1].trim()
+        }
+        if (redditMatch) {
+          interview.redditAnswer = redditMatch[1].trim()
+        }
+        
+        // Platform fallback logic
+        if (!twitterMatch && redditMatch) {
+          if (interview.redditAnswer && interview.redditAnswer !== '（该平台未获得回复）' && interview.redditAnswer !== ' (No response received on this platform)') {
+            interview.twitterAnswer = interview.redditAnswer
+          }
+        } else if (twitterMatch && !redditMatch) {
+          if (interview.twitterAnswer && interview.twitterAnswer !== '（该平台未获得回复）' && interview.twitterAnswer !== ' (No response received on this platform)') {
+            interview.redditAnswer = interview.twitterAnswer
+          }
+        } else if (!twitterMatch && !redditMatch) {
+          interview.twitterAnswer = answerText
+        }
+      }
+      
+      // Extract key quotes
+      const quotesMatch = block.match(/\*\*(?:关键引言|Key Quotes):\*\*\n([\s\S]*?)(?=\n---|\n####|$)/i)
+      if (quotesMatch) {
+        const quotesText = quotesMatch[1]
+        let quoteMatches = quotesText.match(/> "([^"]+)"/g)
+        if (!quoteMatches) {
+          quoteMatches = quotesText.match(/> [\u201C""]([^\u201D""]+)[\u201D""]/g)
+        }
+        if (quoteMatches) {
+          interview.quotes = quoteMatches
+            .map(q => q.replace(/^> [\u201C""]|[\u201D""]$/g, '').trim())
+            .filter(q => q)
+        }
+      }
+      
+      if (interview.name || interview.title) {
+        result.interviews.push(interview)
+      }
+    })
+    
+    // Extract interview summary
+    const summaryMatch = text.match(/### (?:采访摘要与核心观点|Interview Summary & Core Perspectives)\n([\s\S]*?)$/i)
+    if (summaryMatch) {
+      result.summary = summaryMatch[1].trim()
+    }
+  } catch (e) {
+    console.warn('Parse interview_agents failed:', e)
+  }
+  
+  return result
+}
+
 
   return {
     agentLogs,

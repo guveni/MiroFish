@@ -438,7 +438,7 @@ async def get_simulation_history(
                 # Recommended rounds (fallback value)
                 recommended_rounds = int(
                     time_config.get("total_simulation_hours", 0) * 60 / 
-                    max(time_config.get("minutes_per_round", 60), 1)
+                    max(time_config.get("minutes_per_round", 30), 1)
                 )
             else:
                 sim_dict["simulation_requirement"] = ""

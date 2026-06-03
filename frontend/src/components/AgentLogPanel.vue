@@ -229,8 +229,8 @@
                   </div>
                   
                   <!-- Toggle Raw / Structured View Button -->
-                  <button class="toggle-raw-btn" @click.stop="$emit('toggle-raw-result', log.timestamp, $event)">
-                    <span>{{ showRawResult[log.timestamp] ? $t('step4.structuredView') : $t('step4.rawResponse') }}</span>
+                  <button type="button" class="toggle-raw-btn action-btn" @click.stop="$emit('toggle-raw-result', log.timestamp, $event)">
+                    {{ showRawResult[log.timestamp] ? $t('step4.structuredView') : $t('step4.rawResponse') }}
                   </button>
                 </div>
               </template>
@@ -285,27 +285,34 @@
       </TransitionGroup>
     </div>
 
-    <!-- Collapsible Bottom Console (Console Log) -->
-    <div class="console-panel" :class="{ 'is-collapsed': isConsoleCollapsed }">
-      <div class="console-header" @click="$emit('toggle-console-collapse')">
-        <div class="header-left">
-          <span class="header-indicator"></span>
-          <span class="header-title">CONSOLE LOG</span>
-          <span class="header-count mono">{{ consoleLogs.length }} lines</span>
+    <!-- Collapsible bottom console (same structure/styles as Step3 simulation monitor) -->
+    <div class="console-logs" :class="{ 'is-collapsed': isConsoleCollapsed }">
+      <div class="log-header" @click="$emit('toggle-console-collapse')">
+        <div class="log-title-container">
+          <span class="log-title">CONSOLE LOG</span>
+          <svg
+            class="console-collapse-icon"
+            :class="{ 'is-collapsed': isConsoleCollapsed }"
+            viewBox="0 0 24 24"
+            width="12"
+            height="12"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
         </div>
-        <svg class="collapse-icon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-          <polyline points="18 15 12 9 6 15" v-if="!isConsoleCollapsed"></polyline>
-          <polyline points="6 9 12 15 18 9" v-else></polyline>
-        </svg>
+        <span class="log-id">{{ consoleLogs.length }} lines</span>
       </div>
-      <div class="console-content" ref="logContent" v-show="!isConsoleCollapsed">
-        <div 
-          v-for="(log, idx) in consoleLogs" 
-          :key="idx" 
-          class="console-line" 
-          :class="getConsoleLineClass(log)"
+      <div v-show="!isConsoleCollapsed" class="log-content" ref="logContent">
+        <div
+          v-for="(log, idx) in consoleLogs"
+          :key="idx"
+          class="log-line"
         >
-          {{ log }}
+          <span class="log-time">{{ parseConsoleLine(log).time }}</span>
+          <span class="log-msg" :class="getLogMsgClass(log)">{{ parseConsoleLine(log).msg }}</span>
         </div>
       </div>
     </div>
@@ -433,10 +440,23 @@ const formatDuration = (seconds) => {
   return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`
 }
 
-const getConsoleLineClass = (line) => {
-  if (line.includes('ERROR:') || line.includes('CRITICAL:')) return 'line--error'
-  if (line.includes('WARNING:')) return 'line--warn'
-  if (line.includes('SUCCESS:')) return 'line--success'
+/** Report console_log.txt lines: `[HH:MM:SS] LEVEL: message` */
+const parseConsoleLine = (line) => {
+  if (!line || typeof line !== 'string') {
+    return { time: '', level: '', msg: String(line ?? '') }
+  }
+  const match = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s*(\w+):\s*(.*)$/)
+  if (match) {
+    return { time: match[1], level: match[2].toLowerCase(), msg: match[3] }
+  }
+  return { time: '', level: '', msg: line }
+}
+
+const getLogMsgClass = (line) => {
+  const { level } = parseConsoleLine(line)
+  if (level === 'error' || level === 'critical') return 'error'
+  if (level === 'warning') return 'warning'
+  if (level === 'success') return 'success'
   return ''
 }
 
@@ -632,7 +652,7 @@ const PanoramaDisplay = {
             props.resultLength && h('span', { class: 'stat-size' }, formatSize(props.resultLength))
           ])
         ]),
-        props.result.query && h('div', { class: 'header-topic' }, props.result.query)
+        props.result.query && !props.result.query.startsWith('#') && h('div', { class: 'header-topic' }, props.result.query)
       ]),
       
       h('div', { class: 'panorama-tabs' }, [
@@ -994,3 +1014,356 @@ const InterviewDisplay = {
   }
 }
 </script>
+
+<style>
+/* AgentLogPanel was split from Step4Report; these layout rules must live here. */
+
+.llm-response-wrapper {
+  padding-top: 4px;
+}
+
+.response-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.response-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6B7280;
+  letter-spacing: 0.04em;
+}
+
+.response-size {
+  font-size: 10px;
+  color: #9CA3AF;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.completed-summary {
+  margin-top: 8px;
+}
+
+.summary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.summary-key {
+  font-size: 11px;
+  color: #9CA3AF;
+  min-width: 100px;
+}
+
+.summary-val {
+  font-size: 12px;
+  color: #374151;
+}
+
+/* Tool result headers: keep numeric values visually separate from labels */
+.insight-header .stat-item,
+.panorama-header .stat-item,
+.quicksearch-header .stat-item,
+.interview-display .header-stats .stat-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.insight-header .stat-label,
+.panorama-header .stat-label,
+.quicksearch-header .stat-label,
+.interview-display .stat-label {
+  margin-left: 0;
+}
+
+.result-structured {
+  margin-top: 4px;
+}
+
+.toggle-raw-btn {
+  margin-top: 10px;
+}
+
+/* Panorama / insight tool panels (styles moved from Step4Report with AgentLogPanel) */
+.panorama-display,
+.insight-display,
+.quick-search-display,
+.interview-display {
+  padding: 0;
+}
+
+.panorama-header {
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 100%);
+  border-radius: 8px 8px 0 0;
+  border: 1px solid #93C5FD;
+  border-bottom: none;
+}
+
+.panorama-header .header-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.panorama-header .header-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #1D4ED8;
+}
+
+.panorama-header .header-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.panorama-header .header-topic {
+  font-size: 13px;
+  color: #1E40AF;
+  line-height: 1.5;
+  padding-top: 4px;
+  border-top: 1px solid rgba(147, 197, 253, 0.5);
+}
+
+.panorama-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 12px;
+  background: #FAFAFA;
+  border: 1px solid #E5E7EB;
+  border-top: none;
+}
+
+.panorama-tab {
+  padding: 6px 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #6B7280;
+  cursor: pointer;
+}
+
+.panorama-tab:hover {
+  background: #F3F4F6;
+  color: #374151;
+}
+
+.panorama-tab.active {
+  background: #FFFFFF;
+  color: #2563EB;
+  border-color: #93C5FD;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.panorama-content {
+  padding: 12px;
+  background: #FFFFFF;
+  border: 1px solid #E5E7EB;
+  border-top: none;
+  border-radius: 0 0 8px 8px;
+}
+
+.panorama-content .panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #F3F4F6;
+}
+
+.panorama-content .panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.panorama-content .panel-count {
+  font-size: 10px;
+  color: #9CA3AF;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.panorama-content .empty-state {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: #9CA3AF;
+  background: #F9FAFB;
+  border-radius: 6px;
+}
+
+.panorama-content .fact-item {
+  display: flex;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #F3F4F6;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.panorama-content .fact-number {
+  flex-shrink: 0;
+  font-weight: 700;
+  color: #6B7280;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.panorama-content .expand-btn {
+  margin-top: 8px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: #2563EB;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.panorama-content .entities-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.panorama-content .entity-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: #EFF6FF;
+  border: 1px solid #BFDBFE;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* Report console — match Step3Simulation system-logs */
+.console-logs {
+  background: #000;
+  color: #DDD;
+  padding: 16px;
+  font-family: 'JetBrains Mono', monospace;
+  border-top: 1px solid #222;
+  flex-shrink: 0;
+  transition: padding 0.3s ease;
+}
+
+.console-logs .log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid #333;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  font-size: 10px;
+  color: #666;
+  cursor: pointer;
+  user-select: none;
+}
+
+.console-logs .log-header:hover {
+  color: #999;
+}
+
+.console-logs .log-title-container {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.console-logs .log-title {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.console-logs .log-id {
+  flex-shrink: 0;
+  color: #555;
+  font-size: 10px;
+}
+
+.console-logs .console-collapse-icon {
+  color: #666;
+  transition: transform 0.3s ease, color 0.2s ease;
+  flex-shrink: 0;
+}
+
+.console-logs .console-collapse-icon.is-collapsed {
+  transform: rotate(-90deg);
+}
+
+.console-logs .log-header:hover .console-collapse-icon {
+  color: #999;
+}
+
+.console-logs.is-collapsed {
+  padding: 10px 16px;
+}
+
+.console-logs.is-collapsed .log-header {
+  border-bottom: 1px solid transparent;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.console-logs .log-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  height: 100px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.console-logs .log-content::-webkit-scrollbar {
+  width: 4px;
+}
+
+.console-logs .log-content::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 2px;
+}
+
+.console-logs .log-line {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.console-logs .log-time {
+  color: #555;
+  min-width: 75px;
+  flex-shrink: 0;
+}
+
+.console-logs .log-msg {
+  color: #BBB;
+  word-break: break-all;
+}
+
+.console-logs .log-msg.error {
+  color: #EF5350;
+}
+
+.console-logs .log-msg.warning {
+  color: #FFA726;
+}
+
+.console-logs .log-msg.success {
+  color: #66BB6A;
+}
+</style>
